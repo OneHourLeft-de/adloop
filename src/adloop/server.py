@@ -1816,6 +1816,51 @@ def draft_keywords(
     )
 
 
+@mcp.tool(
+    title="Draft keyword match type changes",
+    annotations=_WRITE,
+    tags={"ads"},
+)
+@_safe
+def update_keyword_match_types(
+    ad_group_id: str,
+    updates: _DictList,
+    customer_id: str = "",
+) -> dict:
+    """Change the match type of EXISTING keywords — returns a PREVIEW.
+
+    The in-place alternative to removing and re-adding a keyword, which would
+    lose its history. The keyword is read first, so the preview shows its text
+    and the before/after match type.
+
+    updates: list of {"criterion_id": "123456789", "match_type": "EXACT|PHRASE|BROAD"}.
+        criterion_id comes from get_keyword_performance or a GAQL query on
+        ad_group_criterion for that ad group.
+
+    Google documents AdGroupCriterion.keyword as immutable but places no such
+    restriction on KeywordInfo.match_type, so the in-place change is expected
+    to work without being guaranteed — the apply reports per-keyword success or
+    failure, and a rejection is visible instead of silent. Switching to BROAD
+    on a campaign without Smart Bidding is warned about (the usual wasted-spend
+    trap).
+
+    Call confirm_and_apply with the returned plan_id to execute.
+
+    Args:
+        ad_group_id: Numeric ad group ID that owns the keywords.
+        updates: Keywords to change, each with criterion_id and the new match_type.
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.write import draft_update_keyword_match_types as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        ad_group_id=ad_group_id,
+        updates=updates,
+    )
+
+
 @mcp.tool(title="Draft negative keywords", annotations=_WRITE, tags={"ads"})
 @_safe
 def add_negative_keywords(
@@ -1993,6 +2038,327 @@ def detach_shared_set_from_campaigns(
         customer_id=customer_id or current_config().ads.customer_id,
         shared_set_id=shared_set_id,
         campaign_ids=campaign_ids,
+    )
+
+
+@mcp.tool(title="Draft a brand list", annotations=_WRITE, tags={"ads"})
+@_safe
+def propose_brand_list(
+    list_name: str,
+    brand_ids: _StrList,
+    campaign_ids: _StrList = [],  # noqa: B006 — mutable default required for MCP JSON schema
+    negative: bool = True,
+    customer_id: str = "",
+) -> dict:
+    """Draft a brand list and optionally attach it to campaigns — returns a PREVIEW.
+
+    Creates a SharedSet of type BRANDS, fills it with brands, and — when
+    campaign_ids is given — attaches it to those campaigns.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+
+    Args:
+        list_name: Name for the new list, as it should appear in Google Ads.
+        brand_ids: Commercial Knowledge Graph MIDs — the `id` field from
+            suggest_brands / check_brand_names. Resolve names there first; a
+            display name alone cannot be written.
+        campaign_ids: Optional. Omit to create the list without using it yet,
+            then attach later with attach_brand_list_to_campaigns.
+        negative: True (default) excludes the brands from those campaigns;
+            False restricts targeting to them instead.
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.write import propose_brand_list as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        list_name=list_name,
+        brand_ids=brand_ids,
+        campaign_ids=campaign_ids,
+        negative=negative,
+    )
+
+
+@mcp.tool(title="Draft additions to a brand list", annotations=_WRITE, tags={"ads"})
+@_safe
+def add_to_brand_list(
+    shared_set_id: str,
+    brand_ids: _StrList,
+    customer_id: str = "",
+) -> dict:
+    """Append brands to an EXISTING brand list — returns a PREVIEW.
+
+    Use this when the list already exists and only needs more brands (instead
+    of propose_brand_list, which creates a new list). Call get_brand_lists for
+    the shared_set_id and get_brand_list_brands first to avoid adding a brand
+    twice.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+
+    Args:
+        shared_set_id: Numeric list ID from get_brand_lists.
+        brand_ids: Commercial Knowledge Graph MIDs from suggest_brands.
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.write import add_to_brand_list as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        shared_set_id=shared_set_id,
+        brand_ids=brand_ids,
+    )
+
+
+@mcp.tool(title="Draft removing brands from a list", annotations=_DESTRUCTIVE, tags={"ads"})
+@_safe
+def remove_from_brand_list(
+    shared_set_id: str,
+    criterion_ids: _StrList,
+    customer_id: str = "",
+) -> dict:
+    """Remove brands from a brand list — returns a PREVIEW.
+
+    SharedCriteria have no status field, so removal is the only way to take a
+    brand out of a list — there is nothing to pause. Removing a brand does not
+    detach the list from any campaign.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+
+    Args:
+        shared_set_id: Numeric list ID from get_brand_lists.
+        criterion_ids: Numeric criterion_id values from get_brand_list_brands.
+            This is irreversible — the brand leaves the list immediately.
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.write import remove_from_brand_list as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        shared_set_id=shared_set_id,
+        criterion_ids=criterion_ids,
+    )
+
+
+@mcp.tool(title="Draft attaching a brand list", annotations=_WRITE, tags={"ads"})
+@_safe
+def attach_brand_list_to_campaigns(
+    shared_set_id: str,
+    campaign_ids: _StrList,
+    negative: bool = True,
+    customer_id: str = "",
+) -> dict:
+    """Attach an existing brand list to one or more campaigns — returns a PREVIEW.
+
+    Creates a CampaignCriterion.brand_list per campaign. This is NOT the
+    CampaignSharedSet linkage used for negative keyword lists — brand lists are
+    criteria, and `negative` decides the role: True excludes the brands
+    (default), False restricts targeting to the list.
+
+    Use get_brand_lists for the shared_set_id and get_brand_list_campaigns to
+    inspect existing attachments before attaching.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+
+    Args:
+        shared_set_id: Numeric list ID from get_brand_lists.
+        campaign_ids: Numeric campaign IDs to attach the list to.
+        negative: True (default) excludes the brands from those campaigns;
+            False restricts targeting to them instead.
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.write import attach_brand_list_to_campaigns as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        shared_set_id=shared_set_id,
+        campaign_ids=campaign_ids,
+        negative=negative,
+    )
+
+
+@mcp.tool(title="Draft detaching a brand list", annotations=_DESTRUCTIVE, tags={"ads"})
+@_safe
+def detach_brand_list_from_campaigns(
+    shared_set_id: str,
+    campaign_ids: _StrList,
+    customer_id: str = "",
+) -> dict:
+    """Detach a brand list from one or more campaigns — returns a PREVIEW.
+
+    Removes the CampaignCriterion rows linking the list to those campaigns; the
+    list itself and its brands are unchanged. Campaigns that do not carry the
+    list are reported as `not_attached` in the apply result instead of
+    failing the batch.
+
+    Use get_brand_list_campaigns to inspect existing attachments first.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+
+    Args:
+        shared_set_id: Numeric list ID from get_brand_lists.
+        campaign_ids: Numeric campaign IDs to detach the list from. Campaigns
+            that do not carry the list are reported, not treated as errors.
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.write import detach_brand_list_from_campaigns as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        shared_set_id=shared_set_id,
+        campaign_ids=campaign_ids,
+    )
+
+
+@mcp.tool(title="Draft AI Max settings", annotations=_WRITE, tags={"ads"})
+@_safe
+def draft_ai_max_settings(
+    campaign_id: str,
+    enable_ai_max: bool | None = None,
+    disable_search_term_matching: bool | None = None,
+    ad_group_ids: _StrList = [],  # noqa: B006 — mutable default required for MCP JSON schema
+    include_paused_ad_groups: bool = True,
+    text_asset_automation: str = "UNCHANGED",
+    final_url_expansion: str = "UNCHANGED",
+    customer_id: str = "",
+) -> dict:
+    """Draft AI Max controls for a Search campaign — returns a PREVIEW.
+
+    AI Max is the container that makes brand exclusions usable in Search:
+    Google rejects a brand list on a plain Search campaign ("For search
+    advertising channel, brand lists can only be applied to exclusive
+    targeting, broad match campaigns for inclusive targeting or PMax generated
+    campaigns"). Turning AI Max on while leaving its automations running is the
+    trap — plan both together.
+
+    Reads the campaign and its ad groups first, so the preview names concrete
+    ad groups and shows current values per knob. Nothing is written until
+    confirm_and_apply runs.
+
+    Args:
+        campaign_id: Numeric ID of the Search campaign to prepare.
+        enable_ai_max: Set campaign.ai_max_setting.enable_ai_max. Omit to leave
+            it untouched.
+        disable_search_term_matching: Set
+            ad_group.ai_max_ad_group_setting.disable_search_term_matching on the
+            selected ad groups. Omit to leave them untouched.
+        ad_group_ids: Explicit ad group IDs. Empty means every non-removed ad
+            group of the campaign.
+        include_paused_ad_groups: Default true — paused groups are set as well,
+            so re-enabling one later cannot silently restore search term
+            matching. REMOVED ad groups are never touched.
+        text_asset_automation: OPTED_IN, OPTED_OUT or UNCHANGED for
+            TEXT_ASSET_AUTOMATION.
+        final_url_expansion: OPTED_IN, OPTED_OUT or UNCHANGED for
+            FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION (the v25 field name for
+            final URL expansion).
+        customer_id: Ads account ID. Defaults to the configured account.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.write import draft_ai_max_settings as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        campaign_id=campaign_id,
+        enable_ai_max=enable_ai_max,
+        disable_search_term_matching=disable_search_term_matching,
+        ad_group_ids=ad_group_ids or None,
+        include_paused_ad_groups=include_paused_ad_groups,
+        text_asset_automation=text_asset_automation,
+        final_url_expansion=final_url_expansion,
+    )
+
+
+@mcp.tool(
+    title="Prepare a campaign for brand exclusions",
+    annotations=_WRITE,
+    tags={"ads"},
+)
+@_safe
+def draft_prepare_brand_exclusions(
+    campaign_id: str,
+    include_paused_ad_groups: bool = True,
+    customer_id: str = "",
+) -> dict:
+    """Draft the safe standard state for brand exclusions — returns a PREVIEW.
+
+    Exactly one combination, nothing else:
+
+        enable_ai_max = true
+        disable_search_term_matching = true   (all non-removed ad groups)
+        TEXT_ASSET_AUTOMATION = OPTED_OUT
+        FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION = OPTED_OUT
+
+    No bidding, keyword, match type, ad, URL or budget change, and no brand list
+    is attached — attaching stays a separate step with propose_brand_list /
+    attach_brand_list_to_campaigns once this state is verified in the account.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+
+    Args:
+        campaign_id: Numeric ID of the Search campaign to prepare.
+        include_paused_ad_groups: Default true — paused ad groups are set too,
+            so re-enabling one later cannot silently restore search term
+            matching.
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.write import draft_prepare_brand_exclusions as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        campaign_id=campaign_id,
+        include_paused_ad_groups=include_paused_ad_groups,
+    )
+
+
+@mcp.tool(title="Draft conversion goal settings", annotations=_WRITE, tags={"ads"})
+@_safe
+def draft_conversion_goal_settings(
+    goals: _DictList,
+    level: str = "customer",
+    campaign_id: str = "",
+    customer_id: str = "",
+) -> dict:
+    """Draft biddability changes for conversion goals — returns a PREVIEW.
+
+    Use this to decide which conversions Google bids on: a goal is the pair
+    (category, origin), and ``biddable`` marks it as optimized-for. Typical use
+    is turning micro conversions off at account level, or overriding that for a
+    single campaign.
+
+    goals: list of {"category": "PURCHASE", "origin": "WEBSITE", "biddable": true}.
+        Category and origin are the v25 enum names (ConversionActionCategoryEnum,
+        ConversionOriginEnum). The current configuration is read first, so the
+        preview shows before/after per goal.
+    level: "customer" (default) for the account-wide default, or "campaign" for
+        one campaign — the latter needs campaign_id.
+
+    Goal resources are update-only: goals exist because conversion actions
+    define them, so nothing is created or deleted here.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+
+    Args:
+        goals: The category/origin pairs to set, each with the target biddable flag.
+        level: "customer" for the account-wide default, "campaign" for one campaign.
+        campaign_id: Numeric campaign ID — required when level is "campaign".
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.write import draft_conversion_goal_settings as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        level=level,
+        campaign_id=campaign_id,
+        goals=goals,
     )
 
 
@@ -3277,6 +3643,218 @@ def discover_keywords(
         page_size=page_size,
         customer_id=customer_id or current_config().ads.customer_id,
         include_monthly_volumes=include_monthly_volumes,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Google Ads — Brand Tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(title="Suggest brands", annotations=_READONLY, tags={"ads"})
+@_safe
+def suggest_brands(
+    brand_prefix: str,
+    selected_brand_ids: _StrList = [],  # noqa: B006 — mutable default required for MCP JSON schema
+    customer_id: str = "",
+) -> dict:
+    """Resolve a brand name to the brands Google recognizes for it.
+
+    Mirrors the brand picker in the Google Ads UI
+    (BrandSuggestionService.SuggestBrands): pass a free-text name such as
+    "EscapeGame München" or "NoWayOut" and get back the matching brands with
+    their ID, display name, state, and associated URLs.
+
+    Brand criteria — brand lists, brand exclusions — target the Commercial
+    Knowledge Graph (CKG) MID, not a display name, so resolve the name here
+    before building any brand list. Google's field docs describe the returned
+    `id` as the "CKG MID for verified/global scoped brands": for locally scoped
+    or unverified brands it can differ, and a write may then be rejected.
+    Prefer a candidate whose state is ENABLED, and re-resolve the name if
+    propose_brand_list rejects an ID.
+
+    Args:
+        brand_prefix: The brand name to look up, e.g. "EscapeGame München".
+        selected_brand_ids: IDs already picked, handed back so Google keeps
+            them in the suggestion set while the prefix narrows. Optional.
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.brands import suggest_brands as _impl
+
+    return _impl(
+        current_config(),
+        brand_prefix=brand_prefix,
+        selected_brand_ids=selected_brand_ids,
+        customer_id=customer_id or current_config().ads.customer_id,
+    )
+
+
+@mcp.tool(title="Check brand names", annotations=_READONLY, tags={"ads"})
+@_safe
+def check_brand_names(
+    brand_names: _StrList,
+    customer_id: str = "",
+) -> dict:
+    """Check a list of brand names against Google's brand knowledge graph.
+
+    One SuggestBrands call per name, for the case where a shortlist has to be
+    triaged instead of a single name resolved: which of these brands does
+    Google know at all, and what is the ID of each?
+
+    Every entry answers with status "matched" (with a best-match brand plus
+    all candidates) or "no_match" (empty candidate list — a normal answer,
+    not an error). exact_match marks a candidate whose name matches the query
+    apart from case and punctuation; anything else is a Google suggestion,
+    not a guarantee.
+
+    At most 25 names per call — the API resolves one prefix per request, so
+    split longer lists.
+
+    Args:
+        brand_names: Brand names to check, at most 25 per call.
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.brands import check_brand_names as _impl
+
+    return _impl(
+        current_config(),
+        brand_names=brand_names,
+        customer_id=customer_id or current_config().ads.customer_id,
+    )
+
+
+@mcp.tool(title="List brand lists", annotations=_READONLY, tags={"ads"})
+@_safe
+def get_brand_lists(
+    customer_id: str = "",
+) -> dict:
+    """List all brand lists (SharedSets of type BRANDS) in the account.
+
+    Returns each list's ID, name, status, and member count. Call this before
+    propose_brand_list so an existing list can be reused instead of duplicated.
+
+    Args:
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.brands import get_brand_lists as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+    )
+
+
+@mcp.tool(title="Brands in a brand list", annotations=_READONLY, tags={"ads"})
+@_safe
+def get_brand_list_brands(
+    shared_set_id: str,
+    customer_id: str = "",
+) -> dict:
+    """List the brands inside a brand list.
+
+    Each entry carries brand.entity_id (the Commercial KG MID that
+    suggest_brands returns as id), the display name, primary URL, status and a
+    criterion_id — the latter is what remove_from_brand_list needs.
+
+    Args:
+        shared_set_id: Numeric list ID from get_brand_lists (shared_set.id).
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.brands import get_brand_list_brands as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        shared_set_id=shared_set_id,
+    )
+
+
+@mcp.tool(title="Campaigns using a brand list", annotations=_READONLY, tags={"ads"})
+@_safe
+def get_brand_list_campaigns(
+    shared_set_id: str = "",
+    customer_id: str = "",
+) -> dict:
+    """List which campaigns a brand list is attached to.
+
+    Brand lists attach as CampaignCriterion rows of type BRAND_LIST (not as
+    CampaignSharedSet like negative keyword lists), so each entry also reports
+    `role`: "excluded" when the criterion is negative, "targeted" when it
+    restricts targeting to the list.
+
+    Args:
+        shared_set_id: Numeric list ID from get_brand_lists. Omit to see all
+            brand-list attachments in the account.
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.brands import get_brand_list_campaigns as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        shared_set_id=shared_set_id,
+    )
+
+
+@mcp.tool(title="AI Max settings", annotations=_READONLY, tags={"ads"})
+@_safe
+def get_ai_max_settings(
+    campaign_id: str = "",
+    customer_id: str = "",
+) -> dict:
+    """Read the AI Max controls of Search campaigns, per campaign and ad group.
+
+    Returns for every campaign: id, name, status, advertising channel type,
+    campaign.ai_max_setting.enable_ai_max, campaign.ai_max_setting.bundling_required
+    (output only) and the full campaign.asset_automation_settings list. Each
+    campaign also carries its non-REMOVED ad groups with
+    ad_group.ai_max_ad_group_setting.disable_search_term_matching.
+
+    Use this before draft_ai_max_settings to see the current state, and after
+    confirm_and_apply to verify what the account actually looks like.
+
+    Args:
+        campaign_id: Numeric campaign ID. Omit to list every non-removed
+            Search campaign in the account.
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.ai_max import get_ai_max_settings as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        campaign_id=campaign_id,
+    )
+
+
+@mcp.tool(title="Conversion goals", annotations=_READONLY, tags={"ads"})
+@_safe
+def get_conversion_goals(
+    campaign_id: str = "",
+    customer_id: str = "",
+) -> dict:
+    """Read the conversion goal configuration — which conversions bid.
+
+    Returns the account-wide goals (category/origin pairs with their
+    ``biddable`` flag), the per-campaign overrides, each campaign's goal
+    configuration (``goal_config_level`` CUSTOMER or CAMPAIGN, plus the named
+    goal set in use) and the available named goal sets.
+
+    ``biddable`` is what decides whether a goal is optimized for or only
+    reported — the lever for "stop bidding on micro conversions" without
+    touching the conversion actions themselves.
+
+    Args:
+        campaign_id: Numeric campaign ID to focus on. Omit for account level
+            plus every campaign that has goal overrides.
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.conversion_goals import get_conversion_goals as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        campaign_id=campaign_id,
     )
 
 

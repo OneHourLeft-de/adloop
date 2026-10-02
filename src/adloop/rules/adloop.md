@@ -44,6 +44,13 @@ You have access to AdLoop MCP tools that connect Google Ads, Reddit Ads and Goog
 | `get_detailed_asset_performance` | Top-performing asset combinations — which headline+description+image combos Google selects most | `campaign_id` (optional) |
 | `get_audience_performance` | Audience segment metrics — remarketing, in-market, affinity, demographics | `date_range_start`, `date_range_end`, `campaign_id` (optional) |
 | `get_demographic_targeting` | List current demographic criteria (age/gender/parental status/income) on an ad group or campaign — returns each criterion's `remove_id` for use with `remove_entity` | exactly one of `ad_group_id` or `campaign_id` |
+| `suggest_brands` | Resolve one brand name to the brands Google recognizes — brand ID, name, state, URLs. The ID is what brand criteria target, so resolve here before building any brand list | `brand_prefix` (required), `selected_brand_ids` (optional, IDs already picked) |
+| `check_brand_names` | Triage a shortlist of brand names at once: matched vs. unknown, plus each brand's ID | `brand_names` (required, max 25 per call) |
+| `get_brand_lists` | List brand lists (SharedSets of type BRANDS) before creating a new one — reuse beats duplication | (none) |
+| `get_brand_list_brands` | Contents of a brand list, with `entity_id` (the MID) and `criterion_id` (needed for removal) | `shared_set_id` (required) |
+| `get_brand_list_campaigns` | Which campaigns a brand list is attached to, and whether each attachment excludes (`role: excluded`) or targets (`role: targeted`) | `shared_set_id` (optional) |
+| `get_ai_max_settings` | Current AI Max state per campaign and ad group: `enable_ai_max`, `bundling_required`, the full `asset_automation_settings` list, and each ad group's `disable_search_term_matching`. Read before and after any AI Max change | `campaign_id` (optional), `customer_id` |
+| `get_conversion_goals` | Which conversions Google bids on: account-wide goals with their `biddable` flag, per-campaign overrides, each campaign's goal config (`CUSTOMER`/`CAMPAIGN` + named goal set) and the available goal sets | `campaign_id` (optional), `customer_id` |
 | `run_gaql` | Custom queries not covered by other tools | `query`, `format` (table/json/csv) |
 
 **Return format notes:**
@@ -204,11 +211,30 @@ Reddit is a second ad platform with its own connection (own OAuth app, no develo
 | `add_to_negative_keyword_list` | Append keywords to an EXISTING shared negative keyword list (does NOT add) | `shared_set_id` (from `get_negative_keyword_lists`), keyword list, `match_type` |
 | `attach_shared_set_to_campaigns` | Attach an EXISTING shared set (e.g. shared negative keyword list) to one or more campaigns. Use after creating a campaign to inherit pre-built negatives. | `shared_set_id` (from `get_negative_keyword_lists`), `campaign_ids` list |
 | `detach_shared_set_from_campaigns` | Detach a shared set from one or more campaigns. Removes only the linkage; the shared set and its keywords stay intact. | `shared_set_id`, `campaign_ids` list |
+| `propose_brand_list` | Draft a brand list (SharedSet of type BRANDS) and optionally attach it. Always resolve names with `suggest_brands` first — only the Commercial KG MID can be written. | `list_name`, `brand_ids` (MIDs from `suggest_brands`), optional `campaign_ids`, optional `negative` (default True = exclusion) |
+| `add_to_brand_list` | Append brands to an EXISTING brand list | `shared_set_id` (from `get_brand_lists`), `brand_ids` |
+| `remove_from_brand_list` | Remove brands from a list. SharedCriteria have no status, so this is a real removal — nothing to pause. | `shared_set_id`, `criterion_ids` (from `get_brand_list_brands`) |
+| `attach_brand_list_to_campaigns` | Attach an existing brand list to campaigns as `CampaignCriterion.brand_list` — NOT a `CampaignSharedSet` linkage. `negative=True` excludes, `False` restricts targeting. | `shared_set_id`, `campaign_ids` list, optional `negative` (default True) |
+| `detach_brand_list_from_campaigns` | Remove the brand-list criterion from campaigns; the list itself stays. Campaigns without the list come back as `not_attached`. | `shared_set_id`, `campaign_ids` list |
+| `draft_ai_max_settings` | AI Max controls for a Search campaign: `enable_ai_max`, `disable_search_term_matching` on the selected ad groups, `text_asset_automation`, `final_url_expansion` (each OPTED_IN/OPTED_OUT/UNCHANGED) | `campaign_id`, optional `enable_ai_max`, optional `disable_search_term_matching`, optional `ad_group_ids`, `include_paused_ad_groups` (default true), `text_asset_automation`, `final_url_expansion` |
+| `draft_prepare_brand_exclusions` | One-step safe state so a Search campaign can take a brand exclusion: AI Max on, search term matching off everywhere, text + final URL automation opted out. Changes nothing else. | `campaign_id`, `include_paused_ad_groups` (default true) |
+| `draft_conversion_goal_settings` | Decide which conversions count toward bidding: set the `biddable` flag of (category, origin) goals, account-wide or per campaign. Update-only — goals are created by the conversion actions that define them, and there is no partial failure, so unknown pairs are refused at draft time. | `goals` (list of {category, origin, biddable}), `level` ("customer" default or "campaign"), `campaign_id` (required for level="campaign") |
+| `update_keyword_match_types` | Change the match type of EXISTING keywords in place (keeps the keyword's history, unlike remove + re-add). Reads the keyword first, so the preview shows text and before/after; warns when the target is BROAD on a non-Smart-Bidding campaign. | `ad_group_id`, `updates` (list of {criterion_id, match_type}) |
 | `draft_demographic_targeting` | Propose demographic criteria (age, gender, parental status, income range) at ad group or campaign level. Defaults to EXCLUSION (`negative=True`). | exactly one of `ad_group_id` or `campaign_id`, at least one of `age_ranges`/`genders`/`parental_statuses`/`income_ranges`, optional `negative` (default True) |
 | `pause_entity` | Propose pausing campaign/ad group/ad/keyword | `entity_type`, `entity_id` |
 | `enable_entity` | Propose enabling paused entity | `entity_type`, `entity_id` |
 | `remove_entity` | Propose REMOVING an entity (irreversible) | `entity_type` (incl. "negative_keyword", "shared_criterion", "ad_group_criterion", "campaign_criterion", "campaign_asset", "asset", "customer_asset"), `entity_id` |
 | `confirm_and_apply` | Execute a previously previewed change | `plan_id` from a draft tool, `dry_run` (default true) |
+
+**Preparing a Search campaign for a brand exclusion.** Google only accepts a brand list on a Search campaign that is AI Max enabled (or an exclusive-targeting broad match campaign); otherwise the API answers *"For search advertising channel, brand lists can only be applied to exclusive targeting, broad match campaigns for inclusive targeting or PMax generated campaigns."* The safe sequence is:
+
+1. `get_ai_max_settings(campaign_id)` — see the current state first
+2. `draft_prepare_brand_exclusions(campaign_id)` — AI Max on, search term matching off for every non-removed ad group (paused ones included), text and final-URL automation opted out; nothing else changes
+3. `confirm_and_apply(plan_id, dry_run=true)`, then `confirm_and_apply(plan_id, dry_run=false)`
+4. `get_ai_max_settings(campaign_id)` — read back and confirm before touching brand lists
+5. `attach_brand_list_to_campaigns(shared_set_id, [campaign_id], negative=true)` — the exclusion itself
+
+Never enable AI Max without disabling search term matching in the same plan: that is the state where Google starts matching search terms the advertiser never chose. The apply handler enforces the order (ad groups first, then the campaign) and refuses to enable AI Max if an ad group update failed.
 
 ### Reddit Ads Write Tools (ALL require safety confirmation)
 

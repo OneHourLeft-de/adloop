@@ -1096,6 +1096,832 @@ def detach_shared_set_from_campaigns(
     return plan.to_preview()
 
 
+def _normalize_brand_ids(brand_ids: list[str] | None) -> tuple[list[str], list[str]]:
+    """Validate brand entity IDs. Returns (errors, deduped_ids).
+
+    Brand IDs are Commercial Knowledge Graph MIDs (e.g. "/m/01n5j"), not
+    numbers — do not require digits here.
+    """
+    errors: list[str] = []
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for raw in brand_ids or []:
+        brand_id = str(raw).strip()
+        if not brand_id:
+            continue
+        if brand_id in seen:
+            continue
+        seen.add(brand_id)
+        deduped.append(brand_id)
+    if not deduped:
+        errors.append("At least one brand_id is required")
+    return errors, deduped
+
+
+def _normalize_criterion_ids(criterion_ids: list[str] | None) -> tuple[list[str], list[str]]:
+    errors: list[str] = []
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for raw in criterion_ids or []:
+        criterion_id = str(raw).strip()
+        if not criterion_id:
+            continue
+        if not criterion_id.isdigit():
+            errors.append(
+                f"criterion_id '{criterion_id}' must be numeric "
+                "(from get_brand_list_brands)"
+            )
+            continue
+        if criterion_id in seen:
+            continue
+        seen.add(criterion_id)
+        deduped.append(criterion_id)
+    if not deduped and not errors:
+        errors.append("At least one criterion_id is required")
+    return errors, deduped
+
+
+def propose_brand_list(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    list_name: str = "",
+    brand_ids: list[str] | None = None,
+    campaign_ids: list[str] | None = None,
+    negative: bool = True,
+) -> dict:
+    """Draft a brand list and optionally attach it to campaigns — returns PREVIEW.
+
+    Creates a ``SharedSet`` of type BRANDS, fills it with ``SharedCriterion``
+    entries and — when ``campaign_ids`` is given — attaches it as a
+    ``CampaignCriterion.brand_list``. That criterion is what decides the role:
+    ``negative=True`` excludes the brands, ``negative=False`` restricts
+    targeting to them.
+
+    brand_ids: Commercial Knowledge Graph MIDs, i.e. the ``id`` field from
+        ``suggest_brands`` / ``check_brand_names``. Resolve names there first —
+        a display name alone cannot be written.
+    campaign_ids: optional. Omit to create the list without using it yet, then
+        attach later with ``attach_brand_list_to_campaigns``.
+
+    Call ``confirm_and_apply`` with the returned plan_id to execute.
+    """
+    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    try:
+        check_blocked_operation("create_brand_list", config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+
+    errors: list[str] = []
+    if not list_name:
+        errors.append("list_name is required")
+    brand_errors, deduped_brands = _normalize_brand_ids(brand_ids)
+    errors.extend(brand_errors)
+
+    attachment_errors, deduped_campaigns = _normalize_shared_set_attachment_args(
+        "0" if not campaign_ids else "1", campaign_ids
+    )
+    # No campaigns is valid here (list without attachment) — only keep the
+    # per-campaign-id problems, not the "at least one campaign" complaint.
+    errors.extend(
+        err for err in attachment_errors
+        if not err.startswith("At least one campaign_id")
+    )
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    plan = ChangePlan(
+        operation="create_brand_list",
+        entity_type="brand_list",
+        entity_id="",
+        customer_id=customer_id,
+        changes={
+            "list_name": list_name,
+            "brand_ids": deduped_brands,
+            "campaign_ids": deduped_campaigns,
+            "negative": bool(negative),
+        },
+    )
+    store_plan(plan)
+    return plan.to_preview()
+
+
+def add_to_brand_list(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    shared_set_id: str = "",
+    brand_ids: list[str] | None = None,
+) -> dict:
+    """Draft adding brands to an existing brand list — returns PREVIEW.
+
+    Appends brands to the SharedSet identified by ``shared_set_id``. Use
+    ``get_brand_lists`` to find the list and ``get_brand_list_brands`` to
+    avoid adding a brand twice.
+
+    Call ``confirm_and_apply`` with the returned plan_id to execute.
+    """
+    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    try:
+        check_blocked_operation("add_to_brand_list", config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+
+    errors: list[str] = []
+    shared_set_id = str(shared_set_id or "").strip()
+    if not shared_set_id:
+        errors.append("shared_set_id is required")
+    elif not shared_set_id.isdigit():
+        errors.append("shared_set_id must be a numeric ID (from get_brand_lists)")
+    brand_errors, deduped_brands = _normalize_brand_ids(brand_ids)
+    errors.extend(brand_errors)
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    plan = ChangePlan(
+        operation="add_to_brand_list",
+        entity_type="brand_list",
+        entity_id=shared_set_id,
+        customer_id=customer_id,
+        changes={"shared_set_id": shared_set_id, "brand_ids": deduped_brands},
+    )
+    store_plan(plan)
+    return plan.to_preview()
+
+
+def remove_from_brand_list(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    shared_set_id: str = "",
+    criterion_ids: list[str] | None = None,
+) -> dict:
+    """Draft removing brands from a brand list — returns PREVIEW.
+
+    SharedCriteria have no status field, so removal is the only way to take a
+    brand out of a list. Identify the entries with the numeric
+    ``criterion_id`` (next to ``resource_id``) from ``get_brand_list_brands``.
+
+    Removing a brand from a list does not detach the list from any campaign —
+    use ``detach_brand_list_from_campaigns`` for that.
+
+    Call ``confirm_and_apply`` with the returned plan_id to execute.
+    """
+    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    try:
+        check_blocked_operation("remove_from_brand_list", config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+
+    errors: list[str] = []
+    shared_set_id = str(shared_set_id or "").strip()
+    if not shared_set_id:
+        errors.append("shared_set_id is required")
+    elif not shared_set_id.isdigit():
+        errors.append("shared_set_id must be a numeric ID (from get_brand_lists)")
+    criterion_errors, deduped_criteria = _normalize_criterion_ids(criterion_ids)
+    errors.extend(criterion_errors)
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    plan = ChangePlan(
+        operation="remove_from_brand_list",
+        entity_type="brand_list",
+        entity_id=shared_set_id,
+        customer_id=customer_id,
+        changes={
+            "shared_set_id": shared_set_id,
+            "criterion_ids": deduped_criteria,
+        },
+    )
+    store_plan(plan)
+    return plan.to_preview()
+
+
+def attach_brand_list_to_campaigns(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    shared_set_id: str = "",
+    campaign_ids: list[str] | None = None,
+    negative: bool = True,
+) -> dict:
+    """Draft attaching a brand list to campaigns — returns PREVIEW.
+
+    Creates a ``CampaignCriterion.brand_list`` per campaign. Note this is NOT
+    the ``CampaignSharedSet`` linkage used for negative keyword lists — brand
+    lists are criteria, and the criterion's ``negative`` flag is what makes
+    the list an exclusion (True, the default) or a targeting restriction
+    (False).
+
+    Use ``get_brand_lists`` for the shared_set_id and
+    ``get_brand_list_campaigns`` to see existing attachments.
+
+    Call ``confirm_and_apply`` with the returned plan_id to execute.
+    """
+    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    try:
+        check_blocked_operation("attach_brand_list_to_campaigns", config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+
+    errors, deduped = _normalize_shared_set_attachment_args(
+        shared_set_id, campaign_ids
+    )
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    plan = ChangePlan(
+        operation="attach_brand_list_to_campaigns",
+        entity_type="brand_list_attachment",
+        entity_id=str(shared_set_id),
+        customer_id=customer_id,
+        changes={
+            "shared_set_id": str(shared_set_id),
+            "campaign_ids": deduped,
+            "negative": bool(negative),
+        },
+    )
+    store_plan(plan)
+    return plan.to_preview()
+
+
+def detach_brand_list_from_campaigns(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    shared_set_id: str = "",
+    campaign_ids: list[str] | None = None,
+) -> dict:
+    """Draft detaching a brand list from campaigns — returns PREVIEW.
+
+    Looks up the matching ``CampaignCriterion`` rows at apply time and removes
+    them. Campaigns in the request that do not carry this brand list are
+    reported as ``not_attached`` instead of failing the batch.
+
+    Call ``confirm_and_apply`` with the returned plan_id to execute.
+    """
+    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    try:
+        check_blocked_operation("detach_brand_list_from_campaigns", config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+
+    errors, deduped = _normalize_shared_set_attachment_args(
+        shared_set_id, campaign_ids
+    )
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    plan = ChangePlan(
+        operation="detach_brand_list_from_campaigns",
+        entity_type="brand_list_attachment",
+        entity_id=str(shared_set_id),
+        customer_id=customer_id,
+        changes={
+            "shared_set_id": str(shared_set_id),
+            "campaign_ids": deduped,
+        },
+    )
+    store_plan(plan)
+    return plan.to_preview()
+
+
+def draft_ai_max_settings(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    campaign_id: str = "",
+    enable_ai_max: bool | None = None,
+    disable_search_term_matching: bool | None = None,
+    ad_group_ids: list[str] | None = None,
+    include_paused_ad_groups: bool = True,
+    text_asset_automation: str = "UNCHANGED",
+    final_url_expansion: str = "UNCHANGED",
+) -> dict:
+    """Draft AI Max controls for one Search campaign — returns PREVIEW.
+
+    AI Max is what makes brand exclusions usable in Search: Google rejects a
+    brand list on a plain Search campaign ("For search advertising channel,
+    brand lists can only be applied to exclusive targeting, broad match
+    campaigns for inclusive targeting or PMax generated campaigns"). Enabling
+    it as a container while leaving its automations on is the trap — this tool
+    switches both in one planned change.
+
+    Unlike the other draft tools this one reads the campaign and its ad groups
+    first (read-only): the preview then names concrete ad groups and shows the
+    current settings per knob instead of just echoing the arguments.
+
+    ad_group_ids: optional explicit selection. Omitted/empty means every
+        non-removed ad group of the campaign.
+    include_paused_ad_groups: default True — paused groups are set too, so
+        re-enabling one later cannot silently bring search term matching back.
+        REMOVED ad groups are never touched.
+    text_asset_automation / final_url_expansion: OPTED_IN, OPTED_OUT or
+        UNCHANGED. Final URL expansion is modelled as
+        FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION in API v25.
+
+    Call ``confirm_and_apply`` with the returned plan_id to execute.
+    """
+    from adloop.ads import ai_max as ai
+    from adloop.ads.client import get_ads_client, normalize_customer_id
+    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    try:
+        check_blocked_operation("update_ai_max_settings", config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+
+    errors: list[str] = []
+    campaign_id = str(campaign_id or "").strip()
+    if not campaign_id:
+        errors.append("campaign_id is required")
+    elif not campaign_id.isdigit():
+        errors.append("campaign_id must be a numeric ID")
+    for label, value in (
+        ("text_asset_automation", text_asset_automation),
+        ("final_url_expansion", final_url_expansion),
+    ):
+        if value not in ai.AUTOMATION_CHOICES:
+            errors.append(
+                f"{label} must be one of {', '.join(ai.AUTOMATION_CHOICES)}"
+            )
+    if (
+        enable_ai_max is None
+        and disable_search_term_matching is None
+        and text_asset_automation == "UNCHANGED"
+        and final_url_expansion == "UNCHANGED"
+    ):
+        errors.append(
+            "Nothing to change — set enable_ai_max, disable_search_term_matching, "
+            "text_asset_automation or final_url_expansion"
+        )
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    cid = normalize_customer_id(customer_id or config.ads.customer_id)
+    state = ai.read_ai_max_state(
+        get_ads_client(config), cid, campaign_id=campaign_id
+    )
+    campaigns = state.get("campaigns") or []
+    if not campaigns:
+        return {
+            "error": (
+                f"Campaign {campaign_id} was not found in this account "
+                "(or it is REMOVED). Nothing was planned."
+            )
+        }
+    campaign = campaigns[0]
+    if campaign.get("status") == "REMOVED":
+        return {"error": f"Campaign {campaign_id} is REMOVED — nothing was planned."}
+    if campaign.get("advertising_channel_type") != "SEARCH":
+        return {
+            "error": (
+                "AI Max controls here are for Search campaigns; "
+                f"{campaign_id} is {campaign.get('advertising_channel_type')}."
+            )
+        }
+
+    warnings: list[str] = []
+    targets, target_warnings = ai.plan_targets(
+        campaign,
+        disable_search_term_matching=bool(disable_search_term_matching),
+        ad_group_ids=ad_group_ids,
+        include_paused_ad_groups=include_paused_ad_groups,
+    )
+    warnings.extend(target_warnings)
+    if not campaign.get("ad_groups"):
+        warnings.append("This campaign has no non-removed ad groups.")
+    if (
+        enable_ai_max is True
+        and disable_search_term_matching is not True
+        and campaign.get("ad_groups")
+    ):
+        warnings.append(
+            "enable_ai_max=true without disable_search_term_matching=true leaves "
+            "Google's search term matching active for this campaign."
+        )
+
+    automation_updates = {
+        ai.TEXT_ASSET_AUTOMATION: text_asset_automation,
+        ai.FINAL_URL_EXPANSION: final_url_expansion,
+    }
+    current_settings = campaign.get("asset_automation_settings") or []
+    merged_settings = ai.merge_asset_automation(current_settings, automation_updates)
+    changed_types = [
+        asset_type
+        for asset_type, status in automation_updates.items()
+        if status != "UNCHANGED"
+    ]
+
+    ad_group_changes = []
+    if disable_search_term_matching is not None:
+        ad_group_changes = [
+            {
+                "ad_group_id": group["ad_group_id"],
+                "ad_group_name": group.get("ad_group_name"),
+                "status": group.get("status"),
+                "before": bool(group.get("disable_search_term_matching")),
+                "after": bool(disable_search_term_matching),
+            }
+            for group in targets
+        ]
+
+    changes: dict = {
+        "campaign_id": campaign_id,
+        "campaign_name": campaign.get("campaign_name"),
+    }
+    if enable_ai_max is not None:
+        changes["enable_ai_max"] = enable_ai_max
+        changes["ai_max_before"] = campaign.get("enable_ai_max")
+    if disable_search_term_matching is not None:
+        changes["disable_search_term_matching"] = bool(disable_search_term_matching)
+    if ad_group_changes:
+        changes["ad_groups"] = ad_group_changes
+    if changed_types:
+        changes["asset_automation_settings"] = [
+            item
+            for item in merged_settings
+            if item["asset_automation_type"] in {
+                ai.TEXT_ASSET_AUTOMATION,
+                ai.FINAL_URL_EXPANSION,
+            }
+        ]
+        changes["asset_automation_changed"] = changed_types
+        changes["asset_automation_before"] = current_settings
+        changes["_asset_automation_settings_full"] = merged_settings
+    if warnings:
+        changes["warnings"] = warnings
+
+    plan = ChangePlan(
+        operation="update_ai_max_settings",
+        entity_type="campaign",
+        entity_id=campaign_id,
+        customer_id=customer_id,
+        changes=changes,
+        requires_double_confirm=False,
+    )
+    store_plan(plan)
+    return plan.to_preview()
+
+
+def draft_prepare_brand_exclusions(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    campaign_id: str = "",
+    include_paused_ad_groups: bool = True,
+) -> dict:
+    """Draft the safe standard state for brand exclusions — returns PREVIEW.
+
+    Exactly one combination, nothing else:
+
+        enable_ai_max = true
+        disable_search_term_matching = true   (every non-removed ad group)
+        TEXT_ASSET_AUTOMATION = OPTED_OUT
+        FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION = OPTED_OUT
+
+    No bidding, keyword, match type, ad, URL or budget change, and no brand
+    list is attached — that stays a separate step with
+    ``propose_brand_list`` / ``attach_brand_list_to_campaigns`` once this state
+    is verified in the account.
+
+    Call ``confirm_and_apply`` with the returned plan_id to execute.
+    """
+    result = draft_ai_max_settings(
+        config,
+        customer_id=customer_id,
+        campaign_id=campaign_id,
+        enable_ai_max=True,
+        disable_search_term_matching=True,
+        ad_group_ids=None,
+        include_paused_ad_groups=include_paused_ad_groups,
+        text_asset_automation="OPTED_OUT",
+        final_url_expansion="OPTED_OUT",
+    )
+    if isinstance(result, dict) and result.get("status") == "PENDING_CONFIRMATION":
+        result["purpose"] = "brand_exclusions"
+        result["changes"]["purpose"] = "brand_exclusions"
+    return result
+
+
+def draft_conversion_goal_settings(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    level: str = "customer",
+    campaign_id: str = "",
+    goals: list[dict] | None = None,
+) -> dict:
+    """Draft biddability changes for conversion goals — returns PREVIEW.
+
+    ``biddable`` decides whether a goal is optimized for or only reported, so
+    this is the lever for "stop bidding on micro conversions" without touching
+    the conversion actions themselves.
+
+    level: "customer" (account-wide default) or "campaign" (override for one
+        campaign — requires campaign_id).
+    goals: list of {"category": "PURCHASE", "origin": "WEBSITE", "biddable": true}.
+        Valid category/origin names are enum members from
+        ConversionActionCategoryEnum and ConversionOriginEnum; the current
+        configuration is read first and shown as before/after.
+
+    Goal resources are update-only — goals exist because conversion actions
+    define them, so nothing is created or deleted here.
+
+    Call ``confirm_and_apply`` with the returned plan_id to execute.
+    """
+    from adloop.ads import conversion_goals as cg
+    from adloop.ads.client import get_ads_client, normalize_customer_id
+    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    try:
+        check_blocked_operation("update_conversion_goals", config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+
+    errors: list[str] = []
+    level = (level or cg.CUSTOMER).strip().lower()
+    if level not in cg.LEVELS:
+        errors.append("level must be 'customer' or 'campaign'")
+    campaign_id = str(campaign_id or "").strip()
+    if level == cg.CAMPAIGN:
+        if not campaign_id:
+            errors.append("campaign_id is required for level='campaign'")
+        elif not campaign_id.isdigit():
+            errors.append("campaign_id must be a numeric ID")
+
+    cleaned_goals: list[dict] = []
+    for goal in goals or []:
+        category = str(goal.get("category", "")).strip().upper()
+        origin = str(goal.get("origin", "")).strip().upper()
+        if not category or not origin:
+            errors.append("every goal needs category and origin")
+            continue
+        if "biddable" not in goal:
+            errors.append(f"{category}/{origin} needs biddable (true or false)")
+            continue
+        cleaned_goals.append(
+            {"category": category, "origin": origin, "biddable": bool(goal["biddable"])}
+        )
+    if not cleaned_goals and not errors:
+        errors.append("At least one goal is required")
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    cid = normalize_customer_id(customer_id or config.ads.customer_id)
+    state = cg.read_conversion_goals(
+        get_ads_client(config), cid,
+        campaign_id=campaign_id if level == cg.CAMPAIGN else "",
+    )
+
+    if level == cg.CAMPAIGN:
+        current = []
+        for campaign in state.get("campaigns", []):
+            if campaign["campaign_id"] == campaign_id:
+                current = campaign.get("goals") or []
+                break
+        if not current:
+            return {
+                "error": (
+                    f"No conversion goals found for campaign {campaign_id} — "
+                    "check the ID, or read them first with get_conversion_goals."
+                )
+            }
+    else:
+        current = state.get("customer_goals") or []
+        if not current:
+            return {
+                "error": (
+                    "No customer conversion goals found. Every account has them "
+                    "once conversion actions exist — if this is empty, the read "
+                    "failed; check get_conversion_goals for the raw error."
+                )
+            }
+
+    goal_changes, unknown_pairs = cg.plan_goal_changes(current, cleaned_goals)
+    if unknown_pairs:
+        return {
+            "error": "Validation failed",
+            "details": [
+                "These goals are not part of the current configuration: "
+                + ", ".join(unknown_pairs),
+                "Conversion goals cannot be created here, and the API request "
+                "has no partial failure — one unknown pair would reject the "
+                "whole change. Read the current set with get_conversion_goals.",
+            ],
+        }
+    changes: dict = {
+        "level": level,
+        "goals": goal_changes,
+    }
+    if level == cg.CAMPAIGN:
+        changes["campaign_id"] = campaign_id
+
+    plan = ChangePlan(
+        operation="update_conversion_goals",
+        entity_type="conversion_goals",
+        entity_id=campaign_id or "customer",
+        customer_id=customer_id,
+        changes=changes,
+    )
+    store_plan(plan)
+    return plan.to_preview()
+
+
+_AD_GROUP_KEYWORD_QUERY = """
+    SELECT ad_group.id, ad_group.name,
+           ad_group_criterion.criterion_id,
+           ad_group_criterion.keyword.text,
+           ad_group_criterion.keyword.match_type,
+           ad_group_criterion.status
+    FROM ad_group_criterion
+    WHERE ad_group.id = {ad_group_id}
+"""
+
+
+def _keyword_rows(
+    query: str,
+    *,
+    config: AdLoopConfig | None = None,
+    client: object | None = None,
+    customer_id: str = "",
+) -> list[dict]:
+    """Read ad group criteria — via config (draft) or client (readback)."""
+    if client is not None:
+        from adloop.ads.gaql import _extract_field, _parse_select_fields
+
+        service = client.get_service("GoogleAdsService")
+        fields = _parse_select_fields(query)
+        return [
+            {field: _extract_field(row, field) for field in fields}
+            for row in service.search(customer_id=customer_id, query=query)
+        ]
+
+    from adloop.ads.gaql import execute_query
+
+    return execute_query(config, customer_id, query)
+
+
+def _ad_group_keywords(ad_group_id: str, **kwargs) -> list[dict]:
+    """Keywords of one ad group — negatives and other criterion types drop out."""
+    rows = _keyword_rows(
+        _AD_GROUP_KEYWORD_QUERY.format(ad_group_id=ad_group_id), **kwargs
+    )
+    return [row for row in rows if row.get("ad_group_criterion.keyword.text")]
+
+
+def draft_update_keyword_match_types(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    ad_group_id: str = "",
+    updates: list[dict] | None = None,
+) -> dict:
+    """Draft match type changes for existing keywords — returns PREVIEW.
+
+    ``updates`` is a list of {"criterion_id": "123456789", "match_type": "PHRASE"}.
+    The keyword itself is read first, so the preview shows its text and the
+    before/after match type instead of only echoing the request.
+
+    One caveat to carry into any live use: Google documents
+    ``AdGroupCriterion.keyword`` as immutable while ``KeywordInfo.match_type``
+    carries no such note, so an in-place match type change is expected to work
+    but is not documented as guaranteed. The apply reports per-keyword
+    success/failure (the mutate request supports partial failure). The fallback
+    would be remove-and-re-add, which loses the keyword's history — that is
+    deliberately not what this tool does.
+
+    Call ``confirm_and_apply`` with the returned plan_id to execute.
+    """
+    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    try:
+        check_blocked_operation("update_keyword_match_types", config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+
+    errors: list[str] = []
+    ad_group_id = str(ad_group_id or "").strip()
+    if not ad_group_id:
+        errors.append("ad_group_id is required")
+    elif not ad_group_id.isdigit():
+        errors.append("ad_group_id must be a numeric ID")
+
+    requested: list[dict] = []
+    for update in updates or []:
+        criterion_id = str(update.get("criterion_id", "")).strip()
+        match_type = str(update.get("match_type", "")).strip().upper()
+        if not criterion_id.isdigit():
+            errors.append(
+                f"criterion_id '{criterion_id}' must be the numeric id of a keyword"
+            )
+            continue
+        if match_type not in _VALID_MATCH_TYPES:
+            errors.append(
+                f"criterion_id {criterion_id}: match_type '{match_type}' is invalid "
+                "(must be EXACT, PHRASE, or BROAD)"
+            )
+            continue
+        requested.append({"criterion_id": criterion_id, "match_type": match_type})
+    if not requested and not errors:
+        errors.append("At least one update is required")
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    current_rows = _ad_group_keywords(
+        ad_group_id, config=config, customer_id=customer_id
+    )
+    if not current_rows:
+        return {
+            "error": (
+                f"No keywords found in ad group {ad_group_id} — check the ID, or "
+                "read them first with get_keyword_performance or run_gaql."
+            )
+        }
+    current = {
+        str(row.get("ad_group_criterion.criterion_id")): row for row in current_rows
+    }
+
+    unknown = [u["criterion_id"] for u in requested if u["criterion_id"] not in current]
+    if unknown:
+        return {
+            "error": "Validation failed",
+            "details": [
+                f"These criterion ids are not keywords of ad group {ad_group_id}: "
+                + ", ".join(unknown),
+            ],
+        }
+
+    planned: list[dict] = []
+    warnings: list[str] = []
+    for update in requested:
+        row = current[update["criterion_id"]]
+        before = row.get("ad_group_criterion.keyword.match_type")
+        if before == update["match_type"]:
+            warnings.append(
+                f"{row.get('ad_group_criterion.keyword.text')} already uses "
+                f"{before} — skipped"
+            )
+            continue
+        planned.append(
+            {
+                "criterion_id": update["criterion_id"],
+                "keyword": row.get("ad_group_criterion.keyword.text"),
+                "status": row.get("ad_group_criterion.status"),
+                "match_type_before": before,
+                "match_type": update["match_type"],
+            }
+        )
+
+    if not planned:
+        return {
+            "error": "Nothing to change",
+            "details": warnings
+            or ["Every requested keyword already uses that match type"],
+        }
+
+    warnings.extend(
+        _check_broad_match_safety(
+            config,
+            customer_id,
+            ad_group_id,
+            [
+                {"text": item["keyword"], "match_type": item["match_type"]}
+                for item in planned
+                if item["match_type"] == "BROAD"
+            ],
+        )
+    )
+
+    changes: dict = {"ad_group_id": ad_group_id, "keywords": planned}
+    if warnings:
+        changes["warnings"] = warnings
+
+    plan = ChangePlan(
+        operation="update_keyword_match_types",
+        entity_type="keyword",
+        entity_id=ad_group_id,
+        customer_id=customer_id,
+        changes=changes,
+    )
+    store_plan(plan)
+    return plan.to_preview()
+
+
 def draft_demographic_targeting(
     config: AdLoopConfig,
     *,
@@ -2895,6 +3721,14 @@ def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
         "add_to_negative_keyword_list": _apply_add_to_negative_keyword_list,
         "attach_shared_set_to_campaigns": _apply_attach_shared_set_to_campaigns,
         "detach_shared_set_from_campaigns": _apply_detach_shared_set_from_campaigns,
+        "create_brand_list": _apply_create_brand_list,
+        "add_to_brand_list": _apply_add_to_brand_list,
+        "remove_from_brand_list": _apply_remove_from_brand_list,
+        "attach_brand_list_to_campaigns": _apply_attach_brand_list_to_campaigns,
+        "detach_brand_list_from_campaigns": _apply_detach_brand_list_from_campaigns,
+        "update_ai_max_settings": _apply_ai_max_settings,
+        "update_conversion_goals": _apply_conversion_goals,
+        "update_keyword_match_types": _apply_update_keyword_match_types,
         "add_demographic_criteria": _apply_add_demographic_criteria,
         "pause_entity": _apply_status_change,
         "enable_entity": _apply_status_change,
@@ -4183,4 +5017,570 @@ def _apply_detach_shared_set_from_campaigns(
             msg = getattr(pf_error, "message", "")
             if msg:
                 out["partial_failure_message"] = msg
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Brand lists (SharedSets of type BRANDS)
+# ---------------------------------------------------------------------------
+
+
+def _brand_list_criterion_operations(
+    client: object, shared_set_resource: str, brand_ids: list[str]
+) -> list:
+    """Build SharedCriterionOperation creates from brand entity IDs."""
+    operations = []
+    for brand_id in brand_ids:
+        op = client.get_type("SharedCriterionOperation")
+        criterion = op.create
+        criterion.shared_set = shared_set_resource
+        # entity_id is the writable half of BrandInfo — display_name,
+        # primary_url and status come back output-only from the API.
+        criterion.brand.entity_id = str(brand_id)
+        operations.append(op)
+    return operations
+
+
+def _attach_brand_list_resource(
+    client: object,
+    cid: str,
+    shared_set_resource: str,
+    campaign_ids: list[str],
+    negative: bool,
+) -> dict:
+    """Create CampaignCriterion.brand_list attachments for one brand list.
+
+    Brand lists are criteria, not CampaignSharedSet linkages — the criterion's
+    ``negative`` flag decides whether the list excludes (True) or narrows
+    targeting (False). ``partial_failure`` lets the remaining campaigns succeed
+    when one of them does not support brand lists.
+    """
+    service = client.get_service("CampaignCriterionService")
+    campaign_service = client.get_service("CampaignService")
+
+    operations = []
+    for campaign_id in campaign_ids:
+        op = client.get_type("CampaignCriterionOperation")
+        criterion = op.create
+        criterion.campaign = campaign_service.campaign_path(cid, campaign_id)
+        criterion.brand_list.shared_set = shared_set_resource
+        criterion.negative = bool(negative)
+        operations.append(op)
+
+    request = client.get_type("MutateCampaignCriteriaRequest")
+    request.customer_id = cid
+    request.operations.extend(operations)
+    request.partial_failure = True
+    response = service.mutate_campaign_criteria(request=request)
+
+    pf_error = getattr(response, "partial_failure_error", None)
+    per_op_errors = _parse_partial_failure_per_op(client, pf_error)
+
+    succeeded: list = []
+    failed: list = []
+    for idx, result in enumerate(response.results):
+        if result.resource_name:
+            succeeded.append(result.resource_name)
+        else:
+            failed.append(
+                {
+                    "campaign_id": str(campaign_ids[idx]),
+                    "operation_index": idx,
+                    "error": per_op_errors.get(
+                        idx, "Unknown error (see partial_failure_message)"
+                    ),
+                }
+            )
+
+    out = {
+        "shared_set_resource": shared_set_resource,
+        "negative": bool(negative),
+        "resource_names": succeeded,
+        "campaign_count": len(succeeded),
+    }
+    if failed:
+        out["partial_failure"] = True
+        out["failed_campaigns"] = failed
+        if pf_error is not None:
+            msg = getattr(pf_error, "message", "")
+            if msg:
+                out["partial_failure_message"] = msg
+    return out
+
+
+def _apply_create_brand_list(client: object, cid: str, changes: dict) -> dict:
+    """Create a BRANDS shared set, fill it, optionally attach it to campaigns.
+
+    Three sequential API calls. A failure reports which steps already ran so
+    the caller can clean up or continue from there instead of guessing.
+    """
+    try:
+        shared_set_service = client.get_service("SharedSetService")
+        ss_op = client.get_type("SharedSetOperation")
+        shared_set = ss_op.create
+        shared_set.name = changes["list_name"]
+        shared_set.type_ = client.enums.SharedSetTypeEnum.BRANDS
+        ss_response = shared_set_service.mutate_shared_sets(
+            customer_id=cid, operations=[ss_op]
+        )
+        shared_set_resource = ss_response.results[0].resource_name
+    except Exception as exc:
+        return {
+            "partial_failure": True,
+            "shared_set_resource": None,
+            "completed_steps": [],
+            "failed_step": "create_shared_set",
+            "error": _extract_error_message(exc),
+        }
+
+    try:
+        sc_service = client.get_service("SharedCriterionService")
+        operations = _brand_list_criterion_operations(
+            client, shared_set_resource, changes["brand_ids"]
+        )
+        sc_response = sc_service.mutate_shared_criteria(
+            customer_id=cid, operations=operations
+        )
+        criterion_resource_names = [r.resource_name for r in sc_response.results]
+    except Exception as exc:
+        return {
+            "partial_failure": True,
+            "shared_set_resource": shared_set_resource,
+            "completed_steps": ["create_shared_set"],
+            "failed_step": "add_brands",
+            "error": _extract_error_message(exc),
+        }
+
+    out = {
+        "shared_set_resource": shared_set_resource,
+        "brand_count": len(criterion_resource_names),
+        "criterion_resource_names": criterion_resource_names,
+    }
+
+    campaign_ids = list(changes.get("campaign_ids") or [])
+    if campaign_ids:
+        attachment = _attach_brand_list_resource(
+            client,
+            cid,
+            shared_set_resource,
+            campaign_ids,
+            bool(changes.get("negative", True)),
+        )
+        out["attachment"] = attachment
+        if attachment.get("partial_failure"):
+            out["partial_failure"] = True
+            out["completed_steps"] = ["create_shared_set", "add_brands"]
+            out["failed_step"] = "attach_to_campaigns"
+    return out
+
+
+def _apply_add_to_brand_list(client: object, cid: str, changes: dict) -> dict:
+    """Append brands to an existing brand list."""
+    shared_set_service = client.get_service("SharedSetService")
+    shared_set_resource = shared_set_service.shared_set_path(
+        cid, changes["shared_set_id"]
+    )
+
+    sc_service = client.get_service("SharedCriterionService")
+    operations = _brand_list_criterion_operations(
+        client, shared_set_resource, changes["brand_ids"]
+    )
+    response = sc_service.mutate_shared_criteria(
+        customer_id=cid, operations=operations
+    )
+    return {
+        "shared_set_resource": shared_set_resource,
+        "resource_names": [r.resource_name for r in response.results],
+        "brand_count": len(response.results),
+    }
+
+
+def _apply_remove_from_brand_list(client: object, cid: str, changes: dict) -> dict:
+    """Remove brands (SharedCriteria) from a brand list.
+
+    SharedCriterion has no status field, so this is a real removal — the
+    composite resource name is ``{shared_set_id}~{criterion_id}``.
+    """
+    shared_set_id = changes["shared_set_id"]
+    criterion_service = client.get_service("SharedCriterionService")
+
+    operations = []
+    for criterion_id in changes["criterion_ids"]:
+        op = client.get_type("SharedCriterionOperation")
+        op.remove = (
+            f"customers/{cid}/sharedCriteria/{shared_set_id}~{criterion_id}"
+        )
+        operations.append(op)
+
+    request = client.get_type("MutateSharedCriteriaRequest")
+    request.customer_id = cid
+    request.operations.extend(operations)
+    request.partial_failure = True
+    response = criterion_service.mutate_shared_criteria(request=request)
+
+    pf_error = getattr(response, "partial_failure_error", None)
+    per_op_errors = _parse_partial_failure_per_op(client, pf_error)
+
+    removed: list = []
+    failed: list = []
+    for idx, result in enumerate(response.results):
+        if result.resource_name:
+            removed.append(result.resource_name)
+        else:
+            failed.append(
+                {
+                    "criterion_id": str(changes["criterion_ids"][idx]),
+                    "operation_index": idx,
+                    "error": per_op_errors.get(
+                        idx, "Unknown error (see partial_failure_message)"
+                    ),
+                }
+            )
+
+    out = {
+        "shared_set_id": shared_set_id,
+        "removed_resource_names": removed,
+        "removed_count": len(removed),
+    }
+    if failed:
+        out["partial_failure"] = True
+        out["failed_criteria"] = failed
+        if pf_error is not None:
+            msg = getattr(pf_error, "message", "")
+            if msg:
+                out["partial_failure_message"] = msg
+    return out
+
+
+def _apply_attach_brand_list_to_campaigns(
+    client: object, cid: str, changes: dict
+) -> dict:
+    """Attach an existing brand list to campaigns as CampaignCriterion rows."""
+    shared_set_service = client.get_service("SharedSetService")
+    shared_set_resource = shared_set_service.shared_set_path(
+        cid, changes["shared_set_id"]
+    )
+    return _attach_brand_list_resource(
+        client,
+        cid,
+        shared_set_resource,
+        list(changes["campaign_ids"]),
+        bool(changes.get("negative", True)),
+    )
+
+
+def _apply_detach_brand_list_from_campaigns(
+    client: object, cid: str, changes: dict
+) -> dict:
+    """Remove brand-list criteria from campaigns.
+
+    Unlike CampaignSharedSet the criterion id cannot be derived from the
+    shared set id, so the current attachments are read first and the matching
+    rows removed. Campaigns without this list end up in ``not_attached``.
+    """
+    shared_set_id = changes["shared_set_id"]
+    wanted = [str(c) for c in changes["campaign_ids"]]
+
+    ads_service = client.get_service("GoogleAdsService")
+    query = """
+        SELECT campaign.id, campaign_criterion.criterion_id,
+               campaign_criterion.brand_list.shared_set
+        FROM campaign_criterion
+        WHERE campaign_criterion.type = 'BRAND_LIST'
+          AND campaign_criterion.status != 'REMOVED'
+    """
+    rows = list(ads_service.search(customer_id=cid, query=query))
+
+    suffix = f"/sharedSets/{shared_set_id}"
+    matches: list[tuple[str, str]] = []
+    for row in rows:
+        campaign_id = str(row.campaign.id)
+        if campaign_id not in wanted:
+            continue
+        if not str(row.campaign_criterion.brand_list.shared_set).endswith(suffix):
+            continue
+        matches.append((campaign_id, str(row.campaign_criterion.criterion_id)))
+
+    not_attached = sorted(set(wanted) - {campaign_id for campaign_id, _ in matches})
+    if not matches:
+        return {
+            "shared_set_id": shared_set_id,
+            "removed_resource_names": [],
+            "removed_count": 0,
+            "not_attached": not_attached,
+        }
+
+    criterion_service = client.get_service("CampaignCriterionService")
+    operations = []
+    for campaign_id, criterion_id in matches:
+        op = client.get_type("CampaignCriterionOperation")
+        op.remove = (
+            f"customers/{cid}/campaignCriteria/{campaign_id}~{criterion_id}"
+        )
+        operations.append(op)
+
+    request = client.get_type("MutateCampaignCriteriaRequest")
+    request.customer_id = cid
+    request.operations.extend(operations)
+    request.partial_failure = True
+    response = criterion_service.mutate_campaign_criteria(request=request)
+
+    pf_error = getattr(response, "partial_failure_error", None)
+    per_op_errors = _parse_partial_failure_per_op(client, pf_error)
+
+    removed: list = []
+    failed: list = []
+    for idx, result in enumerate(response.results):
+        if result.resource_name:
+            removed.append(result.resource_name)
+        else:
+            failed.append(
+                {
+                    "campaign_id": matches[idx][0],
+                    "criterion_id": matches[idx][1],
+                    "operation_index": idx,
+                    "error": per_op_errors.get(
+                        idx, "Unknown error (see partial_failure_message)"
+                    ),
+                }
+            )
+
+    out = {
+        "shared_set_id": shared_set_id,
+        "removed_resource_names": removed,
+        "removed_count": len(removed),
+        "not_attached": not_attached,
+    }
+    if failed:
+        out["partial_failure"] = True
+        out["failed_criteria"] = failed
+        if pf_error is not None:
+            msg = getattr(pf_error, "message", "")
+            if msg:
+                out["partial_failure_message"] = msg
+    return out
+
+
+# ---------------------------------------------------------------------------
+# AI Max controls
+# ---------------------------------------------------------------------------
+
+
+def _rollback_ad_group_settings(
+    client: object, cid: str, changes: dict, ad_group_ids: list[str]
+) -> dict:
+    """Restore ad groups to the values they had before this plan ran."""
+    from adloop.ads import ai_max as ai
+
+    by_id = {
+        group["ad_group_id"]: group for group in changes.get("ad_groups") or []
+    }
+    targets = [by_id[gid] for gid in ad_group_ids if gid in by_id]
+    if not targets:
+        return {"attempted": False, "restored": [], "failed": []}
+
+    restored: list[str] = []
+    failed: list[dict] = []
+    for previous in sorted({bool(t.get("before")) for t in targets}):
+        subset = [t for t in targets if bool(t.get("before")) == previous]
+        try:
+            outcome = ai.mutate_ad_group_search_term_matching(
+                client, cid, subset, previous
+            )
+        except Exception as exc:  # noqa: BLE001 — rollback must never mask the original error
+            failed.extend(
+                {"ad_group_id": t["ad_group_id"], "error": _extract_error_message(exc)}
+                for t in subset
+            )
+            continue
+        restored.extend(outcome.get("succeeded") or [])
+        failed.extend(outcome.get("failed") or [])
+
+    return {
+        "attempted": True,
+        "restored": restored,
+        "restored_value": targets[0].get("before"),
+        "failed": failed,
+    }
+
+
+def _apply_ai_max_settings(client: object, cid: str, changes: dict) -> dict:
+    """Apply AI Max controls — ad groups first, campaign second, never reversed.
+
+    The state this must not leave behind is "AI Max on while search term
+    matching is still enabled". Disabling matching changes nothing while AI Max
+    is off, so doing it first closes that window entirely: if an ad group
+    fails, the campaign step is not attempted, and if the campaign step fails,
+    the ad groups are put back to their previous values.
+    """
+    from adloop.ads import ai_max as ai
+
+    campaign_id = changes["campaign_id"]
+    result: dict = {
+        "campaign_id": campaign_id,
+        "completed_steps": [],
+    }
+    if changes.get("warnings"):
+        result["warnings"] = list(changes["warnings"])
+
+    target_matching = changes.get("disable_search_term_matching")
+    ad_groups = list(changes.get("ad_groups") or [])
+
+    if target_matching is not None and ad_groups:
+        group_outcome = ai.mutate_ad_group_search_term_matching(
+            client, cid, ad_groups, bool(target_matching)
+        )
+        result["ad_group_mutation"] = group_outcome
+        if group_outcome.get("failed"):
+            result["failed_step"] = "ad_groups"
+            result["partial_failure"] = True
+            result["message"] = (
+                "Search term matching could not be disabled on every selected "
+                "ad group, so the campaign-level change was NOT made. AI Max "
+                "stays as it was."
+            )
+            result["rollback"] = _rollback_ad_group_settings(
+                client, cid, changes, group_outcome.get("succeeded") or []
+            )
+            result["readback"] = ai.read_ai_max_state(
+                client, cid, campaign_id=campaign_id
+            )
+            return result
+        result["completed_steps"].append("ad_groups")
+    elif target_matching is not None:
+        result["ad_group_mutation"] = {
+            "succeeded": [],
+            "failed": [],
+            "count": 0,
+            "note": "no non-removed ad groups matched",
+        }
+
+    try:
+        campaign_outcome = ai.mutate_campaign_ai_max(
+            client,
+            cid,
+            {
+                "campaign_id": campaign_id,
+                "enable_ai_max": changes.get("enable_ai_max"),
+                "asset_automation_settings": (
+                    changes.get("_asset_automation_settings_full")
+                    if changes.get("asset_automation_changed")
+                    else None
+                ),
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 — must roll back before surfacing
+        result["failed_step"] = "campaign"
+        result["partial_failure"] = True
+        result["error"] = _extract_error_message(exc)
+        if "ad_groups" in result["completed_steps"]:
+            result["rollback"] = _rollback_ad_group_settings(
+                client, cid, changes, [group["ad_group_id"] for group in ad_groups]
+            )
+            result["message"] = (
+                "The campaign-level change failed, so the ad group changes were "
+                "rolled back. Nothing about AI Max or search term matching "
+                "should have changed — verify with the readback below."
+            )
+        result["readback"] = ai.read_ai_max_state(
+            client, cid, campaign_id=campaign_id
+        )
+        return result
+    result["campaign_mutation"] = campaign_outcome
+    if campaign_outcome.get("attempted"):
+        result["completed_steps"].append("campaign")
+
+    result["readback"] = ai.read_ai_max_state(client, cid, campaign_id=campaign_id)
+    return result
+
+
+def _apply_conversion_goals(client: object, cid: str, changes: dict) -> dict:
+    """Flip the biddable flag of the planned goals, then read the state back."""
+    from adloop.ads import conversion_goals as cg
+
+    outcome = cg.mutate_conversion_goals(client, cid, changes)
+    outcome["readback"] = cg.read_conversion_goals(
+        client, cid, campaign_id=changes.get("campaign_id", "")
+    )
+    return outcome
+
+
+def _apply_update_keyword_match_types(
+    client: object, cid: str, changes: dict
+) -> dict:
+    """Change keyword match types, then read the ad group's keywords back.
+
+    ``partial_failure`` is on, so a keyword Google refuses (the resource field
+    is documented as immutable, the match type itself is not) comes back as its
+    own failure instead of hiding a successful sibling.
+    """
+    from google.protobuf import field_mask_pb2
+
+    ad_group_id = changes["ad_group_id"]
+    keywords = list(changes["keywords"])
+
+    service = client.get_service("AdGroupCriterionService")
+    operations = []
+    for item in keywords:
+        operation = client.get_type("AdGroupCriterionOperation")
+        criterion = operation.update
+        criterion.resource_name = (
+            f"customers/{cid}/adGroupCriteria/"
+            f"{ad_group_id}~{item['criterion_id']}"
+        )
+        criterion.keyword.match_type = getattr(
+            client.enums.KeywordMatchTypeEnum, item["match_type"]
+        )
+        operation.update_mask = field_mask_pb2.FieldMask(
+            paths=["keyword.match_type"]
+        )
+        operations.append(operation)
+
+    request = client.get_type("MutateAdGroupCriteriaRequest")
+    request.customer_id = cid
+    request.operations.extend(operations)
+    request.partial_failure = True
+    response = service.mutate_ad_group_criteria(request=request)
+
+    pf_error = getattr(response, "partial_failure_error", None)
+    per_op_errors = _parse_partial_failure_per_op(client, pf_error)
+
+    updated: list[dict] = []
+    failed: list[dict] = []
+    for index, result in enumerate(response.results):
+        item = keywords[index] if index < len(keywords) else {}
+        entry = {
+            "criterion_id": item.get("criterion_id"),
+            "keyword": item.get("keyword"),
+            "match_type": item.get("match_type"),
+        }
+        if getattr(result, "resource_name", ""):
+            updated.append(entry)
+        else:
+            failed.append(
+                {
+                    **entry,
+                    "operation_index": index,
+                    "error": per_op_errors.get(
+                        index, "Unknown error (see partial_failure_message)"
+                    ),
+                }
+            )
+
+    out: dict = {
+        "ad_group_id": ad_group_id,
+        "updated": updated,
+        "updated_count": len(updated),
+        "failed": failed,
+        "readback": {
+            "keywords": _ad_group_keywords(
+                ad_group_id, client=client, customer_id=cid
+            )
+        },
+    }
+    if failed:
+        out["partial_failure"] = True
+        message = getattr(pf_error, "message", "") if pf_error is not None else ""
+        if message:
+            out["partial_failure_message"] = message
     return out
