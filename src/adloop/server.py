@@ -1816,6 +1816,189 @@ def draft_keywords(
     )
 
 
+@mcp.tool(title="Custom conversion goals", annotations=_READONLY, tags={"ads"})
+@_safe
+def get_custom_conversion_goals(
+    campaign_id: str = "",
+    customer_id: str = "",
+) -> dict:
+    """Read the custom conversion goals and the campaign goal configuration.
+
+    Returns every custom goal with its name, status and conversion actions,
+    plus — optionally for one campaign — the goal config the campaign uses
+    (`goal_config_level` CUSTOMER or CAMPAIGN and the assigned custom goal).
+
+    A custom conversion goal bundles conversion actions into a named set that a
+    campaign can be pointed at. Use this before drafting: it shows which goals
+    exist, which actions they contain and what a campaign currently uses.
+
+    Args:
+        campaign_id: Numeric campaign ID. Omit to skip the campaign config.
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.custom_conversion_goals import get_custom_conversion_goals as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        campaign_id=campaign_id,
+    )
+
+
+@mcp.tool(
+    title="Draft a custom conversion goal",
+    annotations=_WRITE,
+    tags={"ads"},
+)
+@_safe
+def draft_custom_conversion_goal(
+    name: str,
+    conversion_action_ids: _StrList,
+    status: str = "ENABLED",
+    customer_id: str = "",
+) -> dict:
+    """Create a custom conversion goal — returns a PREVIEW.
+
+    The goal bundles conversion actions into a named set that campaigns can
+    then be pointed at with draft_assign_custom_conversion_goal. Only the goal
+    is created: conversion actions are read for validation and never modified.
+
+    If a goal with the same name and exactly the same conversion actions
+    already exists, nothing is planned and the result says `already_exists`
+    with that goal's ID. If the name exists with different actions, use
+    draft_update_custom_conversion_goal instead.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+
+    Args:
+        name: Name for the new goal, e.g. "OHL | Kauf + qualifizierte Anrufe".
+        conversion_action_ids: Numeric conversion action IDs. Duplicates are
+            collapsed; unknown or REMOVED actions are refused.
+        status: ENABLED (default) or REMOVED.
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.write import draft_custom_conversion_goal as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        name=name,
+        conversion_action_ids=conversion_action_ids,
+        status=status,
+    )
+
+
+@mcp.tool(
+    title="Draft changes to a custom conversion goal",
+    annotations=_WRITE,
+    tags={"ads"},
+)
+@_safe
+def draft_update_custom_conversion_goal(
+    custom_conversion_goal_id: str,
+    name: str = "",
+    conversion_action_ids: _StrList = [],  # noqa: B006 — mutable default required for MCP JSON schema
+    customer_id: str = "",
+) -> dict:
+    """Rename and/or re-scope an existing custom conversion goal — PREVIEW.
+
+    conversion_action_ids REPLACES the whole action list, it does not append.
+    Leave a parameter empty to keep it unchanged. The preview shows the action
+    list before and after.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+
+    Args:
+        custom_conversion_goal_id: Numeric goal ID from get_custom_conversion_goals.
+        name: New name. Empty leaves the name unchanged.
+        conversion_action_ids: The complete new action list. Empty leaves the
+            actions unchanged.
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.write import draft_update_custom_conversion_goal as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        custom_conversion_goal_id=custom_conversion_goal_id,
+        name=name or None,
+        conversion_action_ids=conversion_action_ids or None,
+    )
+
+
+@mcp.tool(
+    title="Draft assigning a custom conversion goal",
+    annotations=_WRITE,
+    tags={"ads"},
+)
+@_safe
+def draft_assign_custom_conversion_goal(
+    campaign_id: str,
+    custom_conversion_goal_id: str,
+    customer_id: str = "",
+) -> dict:
+    """Point a campaign at a custom conversion goal — returns a PREVIEW.
+
+    Sets goal_config_level=CAMPAIGN and the goal on that campaign's conversion
+    goal config. Nothing else changes: conversion actions, bidding, budgets and
+    the account-level goals stay as they are.
+
+    A campaign must have at least one goal configured when it switches to
+    campaign level — Google answers EMPTY_CONVERSION_GOALS otherwise. That is
+    why this tool assigns a goal instead of clearing goals: use
+    draft_clear_custom_conversion_goal to go back to the account level.
+
+    If the campaign already uses exactly this goal, nothing is planned and the
+    result says `already_configured`.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+
+    Args:
+        campaign_id: Numeric campaign ID to configure.
+        custom_conversion_goal_id: Numeric goal ID from get_custom_conversion_goals.
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.write import draft_assign_custom_conversion_goal as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        campaign_id=campaign_id,
+        custom_conversion_goal_id=custom_conversion_goal_id,
+    )
+
+
+@mcp.tool(
+    title="Draft clearing a custom conversion goal",
+    annotations=_WRITE,
+    tags={"ads"},
+)
+@_safe
+def draft_clear_custom_conversion_goal(
+    campaign_id: str,
+    customer_id: str = "",
+) -> dict:
+    """Put a campaign back on the account-level goals — returns a PREVIEW.
+
+    Sets goal_config_level=CUSTOMER and clears the custom goal: the rollback for
+    draft_assign_custom_conversion_goal. The account-level goals themselves are
+    not touched.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+
+    Args:
+        campaign_id: Numeric campaign ID to reset.
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.write import draft_clear_custom_conversion_goal as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        campaign_id=campaign_id,
+    )
+
+
 @mcp.tool(title="Draft negative keywords", annotations=_WRITE, tags={"ads"})
 @_safe
 def add_negative_keywords(

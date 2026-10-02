@@ -105,7 +105,10 @@ The best features come from real workflows. If you're using AdLoop and find your
 | `get_detailed_asset_performance` | Top-performing asset combinations — which headline+description+image combos Google selects most |
 | `get_audience_performance` | Audience segment performance — remarketing, in-market, affinity, demographics |
 | `get_demographic_targeting` | List demographic criteria (age/gender/parental status/income) on an ad group or campaign |
+| `get_custom_conversion_goals` | Custom conversion goals with their actions, plus one campaign's goal config |
 | `run_gaql` | Arbitrary GAQL queries for anything else |
+
+> **Custom conversion goals** — a named set of conversion actions that a campaign can be pointed at. `get_custom_conversion_goals` shows the goals with their actions and a campaign's current goal config; `draft_custom_conversion_goal` creates a set, `draft_update_custom_conversion_goal` renames or replaces its actions, `draft_assign_custom_conversion_goal` points a campaign at it and `draft_clear_custom_conversion_goal` puts the campaign back on the account-level goals. Only the goal and the campaign's goal config are touched — conversion actions, bidding and budgets stay as they are.
 
 > **Compact mode** — `get_campaign_performance`, `get_keyword_performance`, `get_search_terms`, and `get_ad_performance` accept `compact=true`: account totals, breakdowns, top-10 rows, and pre-computed offender lists (zero-conversion spenders, low-QS keywords, negative-keyword candidates, thin RSAs) instead of every row. ~90% smaller responses — built for account audits so raw tables don't flood your AI's context.
 
@@ -219,6 +222,10 @@ All write operations follow a **draft → preview → confirm** workflow. Nothin
 | `draft_key_event` | Mark a GA4 event as a key event (conversion) — the fix for "fires but isn't tracked as a conversion" |
 | `draft_demographic_targeting` | Propose demographic criteria (age, gender, parental status, income) — exclusions by default |
 | `propose_negative_keyword_list` | Draft a shared negative keyword list (SharedSet) and attach it to a campaign — reusable across multiple campaigns |
+| `draft_custom_conversion_goal` | Create a custom conversion goal (a named set of conversion actions) |
+| `draft_update_custom_conversion_goal` | Rename a custom conversion goal and/or replace its action list (list replace, not append) |
+| `draft_assign_custom_conversion_goal` | Point a campaign at a custom conversion goal (`goal_config_level = CAMPAIGN`) |
+| `draft_clear_custom_conversion_goal` | Put a campaign back on the account-level goals (rollback) |
 | `pause_entity` | Pause a campaign, ad group, ad, or keyword |
 | `enable_entity` | Re-enable a paused entity |
 | `remove_entity` | Permanently remove an entity (irreversible — prefers pause). Supports keywords, negative keywords, ads, ad groups, campaigns. |
