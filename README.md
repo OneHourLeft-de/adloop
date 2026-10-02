@@ -105,7 +105,13 @@ The best features come from real workflows. If you're using AdLoop and find your
 | `get_detailed_asset_performance` | Top-performing asset combinations — which headline+description+image combos Google selects most |
 | `get_audience_performance` | Audience segment performance — remarketing, in-market, affinity, demographics |
 | `get_demographic_targeting` | List demographic criteria (age/gender/parental status/income) on an ad group or campaign |
+| `get_ai_max_settings` | AI Max knobs per campaign and ad group — `enable_ai_max`, `bundling_required`, the full `asset_automation_settings` list and each ad group's `disable_search_term_matching` |
 | `run_gaql` | Arbitrary GAQL queries for anything else |
+
+
+> **AI Max is the container for Search brand exclusions** — Google rejects a brand list on a plain Search campaign with *"For search advertising channel, brand lists can only be applied to exclusive targeting, broad match campaigns for inclusive targeting or PMax generated campaigns."* `draft_prepare_brand_exclusions` sets the state that makes the exclusion usable **without** handing Google the automations: AI Max on, search term matching off per ad group, text and final-URL automation opted out. `draft_ai_max_settings` is the general form when only parts of that state should change.
+
+
 
 > **Compact mode** — `get_campaign_performance`, `get_keyword_performance`, `get_search_terms`, and `get_ad_performance` accept `compact=true`: account totals, breakdowns, top-10 rows, and pre-computed offender lists (zero-conversion spenders, low-QS keywords, negative-keyword candidates, thin RSAs) instead of every row. ~90% smaller responses — built for account audits so raw tables don't flood your AI's context.
 
@@ -219,6 +225,8 @@ All write operations follow a **draft → preview → confirm** workflow. Nothin
 | `draft_key_event` | Mark a GA4 event as a key event (conversion) — the fix for "fires but isn't tracked as a conversion" |
 | `draft_demographic_targeting` | Propose demographic criteria (age, gender, parental status, income) — exclusions by default |
 | `propose_negative_keyword_list` | Draft a shared negative keyword list (SharedSet) and attach it to a campaign — reusable across multiple campaigns |
+| `draft_ai_max_settings` | Draft AI Max controls for a Search campaign: `enable_ai_max`, per-ad-group `disable_search_term_matching`, plus text and final-URL asset automation (each `OPTED_IN` / `OPTED_OUT` / `UNCHANGED`) |
+| `draft_prepare_brand_exclusions` | Draft the safe standard state in one step: AI Max on, search term matching off for every non-removed ad group, text and final-URL automation opted out. Touches nothing else |
 | `pause_entity` | Pause a campaign, ad group, ad, or keyword |
 | `enable_entity` | Re-enable a paused entity |
 | `remove_entity` | Permanently remove an entity (irreversible — prefers pause). Supports keywords, negative keywords, ads, ad groups, campaigns. |

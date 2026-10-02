@@ -1816,6 +1816,11 @@ def draft_keywords(
     )
 
 
+@mcp.tool(
+    title="Draft keyword match type changes",
+    annotations=_WRITE,
+    tags={"ads"},
+)
 @mcp.tool(title="Draft negative keywords", annotations=_WRITE, tags={"ads"})
 @_safe
 def add_negative_keywords(
@@ -1993,6 +1998,110 @@ def detach_shared_set_from_campaigns(
         customer_id=customer_id or current_config().ads.customer_id,
         shared_set_id=shared_set_id,
         campaign_ids=campaign_ids,
+    )
+
+
+@mcp.tool(title="Draft AI Max settings", annotations=_WRITE, tags={"ads"})
+@_safe
+def draft_ai_max_settings(
+    campaign_id: str,
+    enable_ai_max: bool | None = None,
+    disable_search_term_matching: bool | None = None,
+    ad_group_ids: _StrList = [],  # noqa: B006 — mutable default required for MCP JSON schema
+    include_paused_ad_groups: bool = True,
+    text_asset_automation: str = "UNCHANGED",
+    final_url_expansion: str = "UNCHANGED",
+    customer_id: str = "",
+) -> dict:
+    """Draft AI Max controls for a Search campaign — returns a PREVIEW.
+
+    AI Max is the container that makes brand exclusions usable in Search:
+    Google rejects a brand list on a plain Search campaign ("For search
+    advertising channel, brand lists can only be applied to exclusive
+    targeting, broad match campaigns for inclusive targeting or PMax generated
+    campaigns"). Turning AI Max on while leaving its automations running is the
+    trap — plan both together.
+
+    Reads the campaign and its ad groups first, so the preview names concrete
+    ad groups and shows current values per knob. Nothing is written until
+    confirm_and_apply runs.
+
+    Args:
+        campaign_id: Numeric ID of the Search campaign to prepare.
+        enable_ai_max: Set campaign.ai_max_setting.enable_ai_max. Omit to leave
+            it untouched.
+        disable_search_term_matching: Set
+            ad_group.ai_max_ad_group_setting.disable_search_term_matching on the
+            selected ad groups. Omit to leave them untouched.
+        ad_group_ids: Explicit ad group IDs. Empty means every non-removed ad
+            group of the campaign.
+        include_paused_ad_groups: Default true — paused groups are set as well,
+            so re-enabling one later cannot silently restore search term
+            matching. REMOVED ad groups are never touched.
+        text_asset_automation: OPTED_IN, OPTED_OUT or UNCHANGED for
+            TEXT_ASSET_AUTOMATION.
+        final_url_expansion: OPTED_IN, OPTED_OUT or UNCHANGED for
+            FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION (the v25 field name for
+            final URL expansion).
+        customer_id: Ads account ID. Defaults to the configured account.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.write import draft_ai_max_settings as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        campaign_id=campaign_id,
+        enable_ai_max=enable_ai_max,
+        disable_search_term_matching=disable_search_term_matching,
+        ad_group_ids=ad_group_ids or None,
+        include_paused_ad_groups=include_paused_ad_groups,
+        text_asset_automation=text_asset_automation,
+        final_url_expansion=final_url_expansion,
+    )
+
+
+@mcp.tool(
+    title="Prepare a campaign for brand exclusions",
+    annotations=_WRITE,
+    tags={"ads"},
+)
+@_safe
+def draft_prepare_brand_exclusions(
+    campaign_id: str,
+    include_paused_ad_groups: bool = True,
+    customer_id: str = "",
+) -> dict:
+    """Draft the safe standard state for brand exclusions — returns a PREVIEW.
+
+    Exactly one combination, nothing else:
+
+        enable_ai_max = true
+        disable_search_term_matching = true   (all non-removed ad groups)
+        TEXT_ASSET_AUTOMATION = OPTED_OUT
+        FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION = OPTED_OUT
+
+    No bidding, keyword, match type, ad, URL or budget change, and no brand list
+    is attached — attaching stays a separate step with propose_brand_list /
+    attach_brand_list_to_campaigns once this state is verified in the account.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+
+    Args:
+        campaign_id: Numeric ID of the Search campaign to prepare.
+        include_paused_ad_groups: Default true — paused ad groups are set too,
+            so re-enabling one later cannot silently restore search term
+            matching.
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.write import draft_prepare_brand_exclusions as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        campaign_id=campaign_id,
+        include_paused_ad_groups=include_paused_ad_groups,
     )
 
 
@@ -3277,6 +3386,42 @@ def discover_keywords(
         page_size=page_size,
         customer_id=customer_id or current_config().ads.customer_id,
         include_monthly_volumes=include_monthly_volumes,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Google Ads — Brand Tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(title="AI Max settings", annotations=_READONLY, tags={"ads"})
+@_safe
+def get_ai_max_settings(
+    campaign_id: str = "",
+    customer_id: str = "",
+) -> dict:
+    """Read the AI Max controls of Search campaigns, per campaign and ad group.
+
+    Returns for every campaign: id, name, status, advertising channel type,
+    campaign.ai_max_setting.enable_ai_max, campaign.ai_max_setting.bundling_required
+    (output only) and the full campaign.asset_automation_settings list. Each
+    campaign also carries its non-REMOVED ad groups with
+    ad_group.ai_max_ad_group_setting.disable_search_term_matching.
+
+    Use this before draft_ai_max_settings to see the current state, and after
+    confirm_and_apply to verify what the account actually looks like.
+
+    Args:
+        campaign_id: Numeric campaign ID. Omit to list every non-removed
+            Search campaign in the account.
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.ai_max import get_ai_max_settings as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        campaign_id=campaign_id,
     )
 
 

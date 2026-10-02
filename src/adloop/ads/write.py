@@ -1096,6 +1096,224 @@ def detach_shared_set_from_campaigns(
     return plan.to_preview()
 
 
+def draft_ai_max_settings(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    campaign_id: str = "",
+    enable_ai_max: bool | None = None,
+    disable_search_term_matching: bool | None = None,
+    ad_group_ids: list[str] | None = None,
+    include_paused_ad_groups: bool = True,
+    text_asset_automation: str = "UNCHANGED",
+    final_url_expansion: str = "UNCHANGED",
+) -> dict:
+    """Draft AI Max controls for one Search campaign — returns PREVIEW.
+
+    AI Max is what makes brand exclusions usable in Search: Google rejects a
+    brand list on a plain Search campaign ("For search advertising channel,
+    brand lists can only be applied to exclusive targeting, broad match
+    campaigns for inclusive targeting or PMax generated campaigns"). Enabling
+    it as a container while leaving its automations on is the trap — this tool
+    switches both in one planned change.
+
+    Unlike the other draft tools this one reads the campaign and its ad groups
+    first (read-only): the preview then names concrete ad groups and shows the
+    current settings per knob instead of just echoing the arguments.
+
+    ad_group_ids: optional explicit selection. Omitted/empty means every
+        non-removed ad group of the campaign.
+    include_paused_ad_groups: default True — paused groups are set too, so
+        re-enabling one later cannot silently bring search term matching back.
+        REMOVED ad groups are never touched.
+    text_asset_automation / final_url_expansion: OPTED_IN, OPTED_OUT or
+        UNCHANGED. Final URL expansion is modelled as
+        FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION in API v25.
+
+    Call ``confirm_and_apply`` with the returned plan_id to execute.
+    """
+    from adloop.ads import ai_max as ai
+    from adloop.ads.client import get_ads_client, normalize_customer_id
+    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    try:
+        check_blocked_operation("update_ai_max_settings", config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+
+    errors: list[str] = []
+    campaign_id = str(campaign_id or "").strip()
+    if not campaign_id:
+        errors.append("campaign_id is required")
+    elif not campaign_id.isdigit():
+        errors.append("campaign_id must be a numeric ID")
+    for label, value in (
+        ("text_asset_automation", text_asset_automation),
+        ("final_url_expansion", final_url_expansion),
+    ):
+        if value not in ai.AUTOMATION_CHOICES:
+            errors.append(
+                f"{label} must be one of {', '.join(ai.AUTOMATION_CHOICES)}"
+            )
+    if (
+        enable_ai_max is None
+        and disable_search_term_matching is None
+        and text_asset_automation == "UNCHANGED"
+        and final_url_expansion == "UNCHANGED"
+    ):
+        errors.append(
+            "Nothing to change — set enable_ai_max, disable_search_term_matching, "
+            "text_asset_automation or final_url_expansion"
+        )
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    cid = normalize_customer_id(customer_id or config.ads.customer_id)
+    state = ai.read_ai_max_state(
+        get_ads_client(config), cid, campaign_id=campaign_id
+    )
+    campaigns = state.get("campaigns") or []
+    if not campaigns:
+        return {
+            "error": (
+                f"Campaign {campaign_id} was not found in this account "
+                "(or it is REMOVED). Nothing was planned."
+            )
+        }
+    campaign = campaigns[0]
+    if campaign.get("status") == "REMOVED":
+        return {"error": f"Campaign {campaign_id} is REMOVED — nothing was planned."}
+    if campaign.get("advertising_channel_type") != "SEARCH":
+        return {
+            "error": (
+                "AI Max controls here are for Search campaigns; "
+                f"{campaign_id} is {campaign.get('advertising_channel_type')}."
+            )
+        }
+
+    warnings: list[str] = []
+    targets, target_warnings = ai.plan_targets(
+        campaign,
+        disable_search_term_matching=bool(disable_search_term_matching),
+        ad_group_ids=ad_group_ids,
+        include_paused_ad_groups=include_paused_ad_groups,
+    )
+    warnings.extend(target_warnings)
+    if not campaign.get("ad_groups"):
+        warnings.append("This campaign has no non-removed ad groups.")
+    if (
+        enable_ai_max is True
+        and disable_search_term_matching is not True
+        and campaign.get("ad_groups")
+    ):
+        warnings.append(
+            "enable_ai_max=true without disable_search_term_matching=true leaves "
+            "Google's search term matching active for this campaign."
+        )
+
+    automation_updates = {
+        ai.TEXT_ASSET_AUTOMATION: text_asset_automation,
+        ai.FINAL_URL_EXPANSION: final_url_expansion,
+    }
+    current_settings = campaign.get("asset_automation_settings") or []
+    merged_settings = ai.merge_asset_automation(current_settings, automation_updates)
+    changed_types = [
+        asset_type
+        for asset_type, status in automation_updates.items()
+        if status != "UNCHANGED"
+    ]
+
+    ad_group_changes = []
+    if disable_search_term_matching is not None:
+        ad_group_changes = [
+            {
+                "ad_group_id": group["ad_group_id"],
+                "ad_group_name": group.get("ad_group_name"),
+                "status": group.get("status"),
+                "before": bool(group.get("disable_search_term_matching")),
+                "after": bool(disable_search_term_matching),
+            }
+            for group in targets
+        ]
+
+    changes: dict = {
+        "campaign_id": campaign_id,
+        "campaign_name": campaign.get("campaign_name"),
+    }
+    if enable_ai_max is not None:
+        changes["enable_ai_max"] = enable_ai_max
+        changes["ai_max_before"] = campaign.get("enable_ai_max")
+    if disable_search_term_matching is not None:
+        changes["disable_search_term_matching"] = bool(disable_search_term_matching)
+    if ad_group_changes:
+        changes["ad_groups"] = ad_group_changes
+    if changed_types:
+        changes["asset_automation_settings"] = [
+            item
+            for item in merged_settings
+            if item["asset_automation_type"] in {
+                ai.TEXT_ASSET_AUTOMATION,
+                ai.FINAL_URL_EXPANSION,
+            }
+        ]
+        changes["asset_automation_changed"] = changed_types
+        changes["asset_automation_before"] = current_settings
+        changes["_asset_automation_settings_full"] = merged_settings
+    if warnings:
+        changes["warnings"] = warnings
+
+    plan = ChangePlan(
+        operation="update_ai_max_settings",
+        entity_type="campaign",
+        entity_id=campaign_id,
+        customer_id=customer_id,
+        changes=changes,
+        requires_double_confirm=False,
+    )
+    store_plan(plan)
+    return plan.to_preview()
+
+
+def draft_prepare_brand_exclusions(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    campaign_id: str = "",
+    include_paused_ad_groups: bool = True,
+) -> dict:
+    """Draft the safe standard state for brand exclusions — returns PREVIEW.
+
+    Exactly one combination, nothing else:
+
+        enable_ai_max = true
+        disable_search_term_matching = true   (every non-removed ad group)
+        TEXT_ASSET_AUTOMATION = OPTED_OUT
+        FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION = OPTED_OUT
+
+    No bidding, keyword, match type, ad, URL or budget change, and no brand
+    list is attached — attaching one stays a separate step once this state is
+    verified in the account.
+
+    Call ``confirm_and_apply`` with the returned plan_id to execute.
+    """
+    result = draft_ai_max_settings(
+        config,
+        customer_id=customer_id,
+        campaign_id=campaign_id,
+        enable_ai_max=True,
+        disable_search_term_matching=True,
+        ad_group_ids=None,
+        include_paused_ad_groups=include_paused_ad_groups,
+        text_asset_automation="OPTED_OUT",
+        final_url_expansion="OPTED_OUT",
+    )
+    if isinstance(result, dict) and result.get("status") == "PENDING_CONFIRMATION":
+        result["purpose"] = "brand_exclusions"
+        result["changes"]["purpose"] = "brand_exclusions"
+    return result
+
+
 def draft_demographic_targeting(
     config: AdLoopConfig,
     *,
@@ -2895,6 +3113,7 @@ def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
         "add_to_negative_keyword_list": _apply_add_to_negative_keyword_list,
         "attach_shared_set_to_campaigns": _apply_attach_shared_set_to_campaigns,
         "detach_shared_set_from_campaigns": _apply_detach_shared_set_from_campaigns,
+        "update_ai_max_settings": _apply_ai_max_settings,
         "add_demographic_criteria": _apply_add_demographic_criteria,
         "pause_entity": _apply_status_change,
         "enable_entity": _apply_status_change,
@@ -4184,3 +4403,143 @@ def _apply_detach_shared_set_from_campaigns(
             if msg:
                 out["partial_failure_message"] = msg
     return out
+
+
+# ---------------------------------------------------------------------------
+# Brand lists (SharedSets of type BRANDS)
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# AI Max controls
+# ---------------------------------------------------------------------------
+
+
+def _rollback_ad_group_settings(
+    client: object, cid: str, changes: dict, ad_group_ids: list[str]
+) -> dict:
+    """Restore ad groups to the values they had before this plan ran."""
+    from adloop.ads import ai_max as ai
+
+    by_id = {
+        group["ad_group_id"]: group for group in changes.get("ad_groups") or []
+    }
+    targets = [by_id[gid] for gid in ad_group_ids if gid in by_id]
+    if not targets:
+        return {"attempted": False, "restored": [], "failed": []}
+
+    restored: list[str] = []
+    failed: list[dict] = []
+    for previous in sorted({bool(t.get("before")) for t in targets}):
+        subset = [t for t in targets if bool(t.get("before")) == previous]
+        try:
+            outcome = ai.mutate_ad_group_search_term_matching(
+                client, cid, subset, previous
+            )
+        except Exception as exc:  # noqa: BLE001 — rollback must never mask the original error
+            failed.extend(
+                {"ad_group_id": t["ad_group_id"], "error": _extract_error_message(exc)}
+                for t in subset
+            )
+            continue
+        restored.extend(outcome.get("succeeded") or [])
+        failed.extend(outcome.get("failed") or [])
+
+    return {
+        "attempted": True,
+        "restored": restored,
+        "restored_value": targets[0].get("before"),
+        "failed": failed,
+    }
+
+
+def _apply_ai_max_settings(client: object, cid: str, changes: dict) -> dict:
+    """Apply AI Max controls — ad groups first, campaign second, never reversed.
+
+    The state this must not leave behind is "AI Max on while search term
+    matching is still enabled". Disabling matching changes nothing while AI Max
+    is off, so doing it first closes that window entirely: if an ad group
+    fails, the campaign step is not attempted, and if the campaign step fails,
+    the ad groups are put back to their previous values.
+    """
+    from adloop.ads import ai_max as ai
+
+    campaign_id = changes["campaign_id"]
+    result: dict = {
+        "campaign_id": campaign_id,
+        "completed_steps": [],
+    }
+    if changes.get("warnings"):
+        result["warnings"] = list(changes["warnings"])
+
+    target_matching = changes.get("disable_search_term_matching")
+    ad_groups = list(changes.get("ad_groups") or [])
+
+    if target_matching is not None and ad_groups:
+        group_outcome = ai.mutate_ad_group_search_term_matching(
+            client, cid, ad_groups, bool(target_matching)
+        )
+        result["ad_group_mutation"] = group_outcome
+        if group_outcome.get("failed"):
+            result["failed_step"] = "ad_groups"
+            result["partial_failure"] = True
+            result["message"] = (
+                "Search term matching could not be disabled on every selected "
+                "ad group, so the campaign-level change was NOT made. AI Max "
+                "stays as it was."
+            )
+            result["rollback"] = _rollback_ad_group_settings(
+                client, cid, changes, group_outcome.get("succeeded") or []
+            )
+            result["readback"] = ai.read_ai_max_state(
+                client, cid, campaign_id=campaign_id
+            )
+            return result
+        result["completed_steps"].append("ad_groups")
+    elif target_matching is not None:
+        result["ad_group_mutation"] = {
+            "succeeded": [],
+            "failed": [],
+            "count": 0,
+            "note": "no non-removed ad groups matched",
+        }
+
+    try:
+        campaign_outcome = ai.mutate_campaign_ai_max(
+            client,
+            cid,
+            {
+                "campaign_id": campaign_id,
+                "enable_ai_max": changes.get("enable_ai_max"),
+                "asset_automation_settings": (
+                    changes.get("_asset_automation_settings_full")
+                    if changes.get("asset_automation_changed")
+                    else None
+                ),
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 — must roll back before surfacing
+        result["failed_step"] = "campaign"
+        result["partial_failure"] = True
+        result["error"] = _extract_error_message(exc)
+        if "ad_groups" in result["completed_steps"]:
+            result["rollback"] = _rollback_ad_group_settings(
+                client, cid, changes, [group["ad_group_id"] for group in ad_groups]
+            )
+            result["message"] = (
+                "The campaign-level change failed, so the ad group changes were "
+                "rolled back. Nothing about AI Max or search term matching "
+                "should have changed — verify with the readback below."
+            )
+        result["readback"] = ai.read_ai_max_state(
+            client, cid, campaign_id=campaign_id
+        )
+        return result
+    result["campaign_mutation"] = campaign_outcome
+    if campaign_outcome.get("attempted"):
+        result["completed_steps"].append("campaign")
+
+    result["readback"] = ai.read_ai_max_state(client, cid, campaign_id=campaign_id)
+    return result
+
+

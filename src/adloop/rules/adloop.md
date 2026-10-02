@@ -44,6 +44,7 @@ You have access to AdLoop MCP tools that connect Google Ads, Reddit Ads and Goog
 | `get_detailed_asset_performance` | Top-performing asset combinations — which headline+description+image combos Google selects most | `campaign_id` (optional) |
 | `get_audience_performance` | Audience segment metrics — remarketing, in-market, affinity, demographics | `date_range_start`, `date_range_end`, `campaign_id` (optional) |
 | `get_demographic_targeting` | List current demographic criteria (age/gender/parental status/income) on an ad group or campaign — returns each criterion's `remove_id` for use with `remove_entity` | exactly one of `ad_group_id` or `campaign_id` |
+| `get_ai_max_settings` | Current AI Max state per campaign and ad group: `enable_ai_max`, `bundling_required`, the full `asset_automation_settings` list, and each ad group's `disable_search_term_matching`. Read before and after any AI Max change | `campaign_id` (optional), `customer_id` |
 | `run_gaql` | Custom queries not covered by other tools | `query`, `format` (table/json/csv) |
 
 **Return format notes:**
@@ -204,11 +205,23 @@ Reddit is a second ad platform with its own connection (own OAuth app, no develo
 | `add_to_negative_keyword_list` | Append keywords to an EXISTING shared negative keyword list (does NOT add) | `shared_set_id` (from `get_negative_keyword_lists`), keyword list, `match_type` |
 | `attach_shared_set_to_campaigns` | Attach an EXISTING shared set (e.g. shared negative keyword list) to one or more campaigns. Use after creating a campaign to inherit pre-built negatives. | `shared_set_id` (from `get_negative_keyword_lists`), `campaign_ids` list |
 | `detach_shared_set_from_campaigns` | Detach a shared set from one or more campaigns. Removes only the linkage; the shared set and its keywords stay intact. | `shared_set_id`, `campaign_ids` list |
+| `draft_ai_max_settings` | AI Max controls for a Search campaign: `enable_ai_max`, `disable_search_term_matching` on the selected ad groups, `text_asset_automation`, `final_url_expansion` (each OPTED_IN/OPTED_OUT/UNCHANGED) | `campaign_id`, optional `enable_ai_max`, optional `disable_search_term_matching`, optional `ad_group_ids`, `include_paused_ad_groups` (default true), `text_asset_automation`, `final_url_expansion` |
+| `draft_prepare_brand_exclusions` | One-step safe state so a Search campaign can take a brand exclusion: AI Max on, search term matching off everywhere, text + final URL automation opted out. Changes nothing else. | `campaign_id`, `include_paused_ad_groups` (default true) |
 | `draft_demographic_targeting` | Propose demographic criteria (age, gender, parental status, income range) at ad group or campaign level. Defaults to EXCLUSION (`negative=True`). | exactly one of `ad_group_id` or `campaign_id`, at least one of `age_ranges`/`genders`/`parental_statuses`/`income_ranges`, optional `negative` (default True) |
 | `pause_entity` | Propose pausing campaign/ad group/ad/keyword | `entity_type`, `entity_id` |
 | `enable_entity` | Propose enabling paused entity | `entity_type`, `entity_id` |
 | `remove_entity` | Propose REMOVING an entity (irreversible) | `entity_type` (incl. "negative_keyword", "shared_criterion", "ad_group_criterion", "campaign_criterion", "campaign_asset", "asset", "customer_asset"), `entity_id` |
 | `confirm_and_apply` | Execute a previously previewed change | `plan_id` from a draft tool, `dry_run` (default true) |
+
+**Preparing a Search campaign for a brand exclusion.** Google only accepts a brand list on a Search campaign that is AI Max enabled (or an exclusive-targeting broad match campaign); otherwise the API answers *"For search advertising channel, brand lists can only be applied to exclusive targeting, broad match campaigns for inclusive targeting or PMax generated campaigns."* The safe sequence is:
+
+1. `get_ai_max_settings(campaign_id)` — see the current state first
+2. `draft_prepare_brand_exclusions(campaign_id)` — AI Max on, search term matching off for every non-removed ad group (paused ones included), text and final-URL automation opted out; nothing else changes
+3. `confirm_and_apply(plan_id, dry_run=true)`, then `confirm_and_apply(plan_id, dry_run=false)`
+4. `get_ai_max_settings(campaign_id)` — read back and confirm before touching brand lists
+5. `attach_brand_list_to_campaigns(shared_set_id, [campaign_id], negative=true)` — the exclusion itself
+
+Never enable AI Max without disabling search term matching in the same plan: that is the state where Google starts matching search terms the advertiser never chose. The apply handler enforces the order (ad groups first, then the campaign) and refuses to enable AI Max if an ad group update failed.
 
 ### Reddit Ads Write Tools (ALL require safety confirmation)
 
