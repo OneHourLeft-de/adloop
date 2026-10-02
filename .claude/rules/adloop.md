@@ -44,6 +44,8 @@ You have access to AdLoop MCP tools that connect Google Ads, Reddit Ads and Goog
 | `get_detailed_asset_performance` | Top-performing asset combinations — which headline+description+image combos Google selects most | `campaign_id` (optional) |
 | `get_audience_performance` | Audience segment metrics — remarketing, in-market, affinity, demographics | `date_range_start`, `date_range_end`, `campaign_id` (optional) |
 | `get_demographic_targeting` | List current demographic criteria (age/gender/parental status/income) on an ad group or campaign — returns each criterion's `remove_id` for use with `remove_entity` | exactly one of `ad_group_id` or `campaign_id` |
+| `suggest_brands` | Resolve one brand name to the brands Google recognizes — brand ID, name, state, URLs. The ID is what brand criteria target, so resolve here before building any brand list | `brand_prefix` (required), `selected_brand_ids` (optional, IDs already picked) |
+| `check_brand_names` | Triage a shortlist of brand names at once: matched vs. unknown, plus each brand's ID | `brand_names` (required, max 25 per call) |
 | `run_gaql` | Custom queries not covered by other tools | `query`, `format` (table/json/csv) |
 
 **Return format notes:**

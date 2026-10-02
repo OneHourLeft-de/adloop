@@ -105,7 +105,11 @@ The best features come from real workflows. If you're using AdLoop and find your
 | `get_detailed_asset_performance` | Top-performing asset combinations — which headline+description+image combos Google selects most |
 | `get_audience_performance` | Audience segment performance — remarketing, in-market, affinity, demographics |
 | `get_demographic_targeting` | List demographic criteria (age/gender/parental status/income) on an ad group or campaign |
+| `suggest_brands` | Resolve a brand name to the brands Google recognizes — brand ID, name, state, URLs |
+| `check_brand_names` | Check a shortlist of brand names against Google's brand knowledge graph (max 25 per call) |
 | `run_gaql` | Arbitrary GAQL queries for anything else |
+
+> **Brand targeting** — brand criteria (brand lists, brand exclusions) target a brand's **Commercial Knowledge Graph ID**, not its display name. Use `suggest_brands` for a single name or `check_brand_names` for a shortlist to get the ID; `exact_match` marks a candidate whose name matches apart from case and punctuation, everything else is a Google suggestion.
 
 > **Compact mode** — `get_campaign_performance`, `get_keyword_performance`, `get_search_terms`, and `get_ad_performance` accept `compact=true`: account totals, breakdowns, top-10 rows, and pre-computed offender lists (zero-conversion spenders, low-QS keywords, negative-keyword candidates, thin RSAs) instead of every row. ~90% smaller responses — built for account audits so raw tables don't flood your AI's context.
 

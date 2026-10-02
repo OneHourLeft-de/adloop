@@ -3281,6 +3281,72 @@ def discover_keywords(
 
 
 # ---------------------------------------------------------------------------
+# Google Ads — Brand Tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(title="Suggest brands", annotations=_READONLY, tags={"ads"})
+@_safe
+def suggest_brands(
+    brand_prefix: str,
+    selected_brand_ids: _StrList = [],  # noqa: B006 — mutable default required for MCP JSON schema
+    customer_id: str = "",
+) -> dict:
+    """Resolve a brand name to the brands Google recognizes for it.
+
+    Mirrors the brand picker in the Google Ads UI
+    (BrandSuggestionService.SuggestBrands): pass a free-text name such as
+    "EscapeGame München" or "NoWayOut" and get back the matching brands with
+    their ID, display name, state, and associated URLs.
+
+    The returned brand ID is the Commercial Knowledge Graph ID. Brand
+    criteria — brand lists, brand exclusions — target that ID, not a display
+    name, so resolve the name here before building any brand list.
+
+    selected_brand_ids: IDs already picked, handed back so Google keeps them
+    in the suggestion set while the prefix narrows. Optional.
+    """
+    from adloop.ads.brands import suggest_brands as _impl
+
+    return _impl(
+        current_config(),
+        brand_prefix=brand_prefix,
+        selected_brand_ids=selected_brand_ids,
+        customer_id=customer_id or current_config().ads.customer_id,
+    )
+
+
+@mcp.tool(title="Check brand names", annotations=_READONLY, tags={"ads"})
+@_safe
+def check_brand_names(
+    brand_names: _StrList,
+    customer_id: str = "",
+) -> dict:
+    """Check a list of brand names against Google's brand knowledge graph.
+
+    One SuggestBrands call per name, for the case where a shortlist has to be
+    triaged instead of a single name resolved: which of these brands does
+    Google know at all, and what is the ID of each?
+
+    Every entry answers with status "matched" (with a best-match brand plus
+    all candidates) or "no_match" (empty candidate list — a normal answer,
+    not an error). exact_match marks a candidate whose name matches the query
+    apart from case and punctuation; anything else is a Google suggestion,
+    not a guarantee.
+
+    At most 25 names per call — the API resolves one prefix per request, so
+    split longer lists.
+    """
+    from adloop.ads.brands import check_brand_names as _impl
+
+    return _impl(
+        current_config(),
+        brand_names=brand_names,
+        customer_id=customer_id or current_config().ads.customer_id,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Optional local-only debug tools (not shipped in git).
 # ---------------------------------------------------------------------------
 # Activated by ``ADLOOP_DEBUG_TOOLS=1``. The module file is .gitignored and
