@@ -111,7 +111,6 @@ The best features come from real workflows. If you're using AdLoop and find your
 | `get_brand_list_brands` | List the brands inside a list, with the Commercial KG MID and the criterion ID for removals |
 | `get_brand_list_campaigns` | Which campaigns a brand list is attached to, and whether each attachment excludes or targets |
 | `get_ai_max_settings` | AI Max knobs per campaign and ad group — `enable_ai_max`, `bundling_required`, the full `asset_automation_settings` list and each ad group's `disable_search_term_matching` |
-| `get_conversion_goals` | Conversion goal configuration — account-wide goals with their `biddable` flag, per-campaign overrides, each campaign's goal config and the named goal sets |
 | `run_gaql` | Arbitrary GAQL queries for anything else |
 | `get_custom_conversion_goals` | Custom conversion goals with their actions, plus one campaign's goal config |
 > **Custom conversion goals** — a named set of conversion actions that a campaign can be pointed at. `get_custom_conversion_goals` shows the goals with their actions and a campaign's current goal config; `draft_custom_conversion_goal` creates a set, `draft_update_custom_conversion_goal` renames or replaces its actions, `draft_assign_custom_conversion_goal` points a campaign at it and `draft_clear_custom_conversion_goal` puts the campaign back on the account-level goals. Only the goal and the campaign's goal config are touched — conversion actions, bidding and budgets stay as they are.
@@ -121,9 +120,7 @@ The best features come from real workflows. If you're using AdLoop and find your
 
 > **AI Max is the container for Search brand exclusions** — Google rejects a brand list on a plain Search campaign with *"For search advertising channel, brand lists can only be applied to exclusive targeting, broad match campaigns for inclusive targeting or PMax generated campaigns."* `draft_prepare_brand_exclusions` sets the state that makes the exclusion usable **without** handing Google the automations: AI Max on, search term matching off per ad group, text and final-URL automation opted out. `draft_ai_max_settings` is the general form when only parts of that state should change.
 
-> **Conversion goals decide what is bid on** — a goal is the pair (category, origin) of your conversion actions, and `biddable` marks whether Google optimizes for it or only reports it. `get_conversion_goals` shows the account-wide defaults, per-campaign overrides and the named goal set in use; `draft_conversion_goal_settings` flips a flag at either level. The resources are update-only (goals come into existence with the conversion actions that define them), and the mutate requests have no partial failure — one unknown pair would reject the whole change, so the draft refuses pairs that are not in the current configuration.
 
-> **Keyword match types can be changed in place** — `update_keyword_match_types` edits the existing criterion instead of removing and re-adding the keyword, which would throw away its history. One honest caveat: Google documents `AdGroupCriterion.keyword` as immutable while `KeywordInfo.match_type` carries no such note, so the in-place change is expected to work but is not documented as guaranteed. The apply reports per keyword, so a rejection is visible rather than silent; the fallback would be remove-and-re-add, which this tool deliberately does not do.
 
 > **Compact mode** — `get_campaign_performance`, `get_keyword_performance`, `get_search_terms`, and `get_ad_performance` accept `compact=true`: account totals, breakdowns, top-10 rows, and pre-computed offender lists (zero-conversion spenders, low-QS keywords, negative-keyword candidates, thin RSAs) instead of every row. ~90% smaller responses — built for account audits so raw tables don't flood your AI's context.
 
@@ -248,8 +245,6 @@ All write operations follow a **draft → preview → confirm** workflow. Nothin
 | `detach_brand_list_from_campaigns` | Draft detaching a brand list from campaigns (removes only the criterion, the list stays) |
 | `draft_ai_max_settings` | Draft AI Max controls for a Search campaign: `enable_ai_max`, per-ad-group `disable_search_term_matching`, plus text and final-URL asset automation (each `OPTED_IN` / `OPTED_OUT` / `UNCHANGED`) |
 | `draft_prepare_brand_exclusions` | Draft the safe standard state in one step: AI Max on, search term matching off for every non-removed ad group, text and final-URL automation opted out. Touches nothing else |
-| `draft_conversion_goal_settings` | Draft which conversions bid: sets the `biddable` flag of (category, origin) goals, at account level or as a campaign override |
-| `update_keyword_match_types` | Change the match type of existing keywords in place (EXACT / PHRASE / BROAD) instead of removing and re-adding them — keeps the keyword's history |
 | `pause_entity` | Pause a campaign, ad group, ad, or keyword |
 | `enable_entity` | Re-enable a paused entity |
 | `remove_entity` | Permanently remove an entity (irreversible — prefers pause). Supports keywords, negative keywords, ads, ad groups, campaigns. |

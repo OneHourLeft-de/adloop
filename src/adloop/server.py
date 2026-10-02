@@ -1821,46 +1821,6 @@ def draft_keywords(
     annotations=_WRITE,
     tags={"ads"},
 )
-@_safe
-def update_keyword_match_types(
-    ad_group_id: str,
-    updates: _DictList,
-    customer_id: str = "",
-) -> dict:
-    """Change the match type of EXISTING keywords — returns a PREVIEW.
-
-    The in-place alternative to removing and re-adding a keyword, which would
-    lose its history. The keyword is read first, so the preview shows its text
-    and the before/after match type.
-
-    updates: list of {"criterion_id": "123456789", "match_type": "EXACT|PHRASE|BROAD"}.
-        criterion_id comes from get_keyword_performance or a GAQL query on
-        ad_group_criterion for that ad group.
-
-    Google documents AdGroupCriterion.keyword as immutable but places no such
-    restriction on KeywordInfo.match_type, so the in-place change is expected
-    to work without being guaranteed — the apply reports per-keyword success or
-    failure, and a rejection is visible instead of silent. Switching to BROAD
-    on a campaign without Smart Bidding is warned about (the usual wasted-spend
-    trap).
-
-    Call confirm_and_apply with the returned plan_id to execute.
-
-    Args:
-        ad_group_id: Numeric ad group ID that owns the keywords.
-        updates: Keywords to change, each with criterion_id and the new match_type.
-        customer_id: Ads account ID. Defaults to the configured account.
-    """
-    from adloop.ads.write import draft_update_keyword_match_types as _impl
-
-    return _impl(
-        current_config(),
-        customer_id=customer_id or current_config().ads.customer_id,
-        ad_group_id=ad_group_id,
-        updates=updates,
-    )
-
-
 @mcp.tool(title="Draft negative keywords", annotations=_WRITE, tags={"ads"})
 @_safe
 def add_negative_keywords(
@@ -2315,50 +2275,6 @@ def draft_prepare_brand_exclusions(
         customer_id=customer_id or current_config().ads.customer_id,
         campaign_id=campaign_id,
         include_paused_ad_groups=include_paused_ad_groups,
-    )
-
-
-@mcp.tool(title="Draft conversion goal settings", annotations=_WRITE, tags={"ads"})
-@_safe
-def draft_conversion_goal_settings(
-    goals: _DictList,
-    level: str = "customer",
-    campaign_id: str = "",
-    customer_id: str = "",
-) -> dict:
-    """Draft biddability changes for conversion goals — returns a PREVIEW.
-
-    Use this to decide which conversions Google bids on: a goal is the pair
-    (category, origin), and ``biddable`` marks it as optimized-for. Typical use
-    is turning micro conversions off at account level, or overriding that for a
-    single campaign.
-
-    goals: list of {"category": "PURCHASE", "origin": "WEBSITE", "biddable": true}.
-        Category and origin are the v25 enum names (ConversionActionCategoryEnum,
-        ConversionOriginEnum). The current configuration is read first, so the
-        preview shows before/after per goal.
-    level: "customer" (default) for the account-wide default, or "campaign" for
-        one campaign — the latter needs campaign_id.
-
-    Goal resources are update-only: goals exist because conversion actions
-    define them, so nothing is created or deleted here.
-
-    Call confirm_and_apply with the returned plan_id to execute.
-
-    Args:
-        goals: The category/origin pairs to set, each with the target biddable flag.
-        level: "customer" for the account-wide default, "campaign" for one campaign.
-        campaign_id: Numeric campaign ID — required when level is "campaign".
-        customer_id: Ads account ID. Defaults to the configured account.
-    """
-    from adloop.ads.write import draft_conversion_goal_settings as _impl
-
-    return _impl(
-        current_config(),
-        customer_id=customer_id or current_config().ads.customer_id,
-        level=level,
-        campaign_id=campaign_id,
-        goals=goals,
     )
 
 
@@ -3826,36 +3742,6 @@ def get_ai_max_settings(
         campaign_id=campaign_id,
     )
 
-
-@mcp.tool(title="Conversion goals", annotations=_READONLY, tags={"ads"})
-@_safe
-def get_conversion_goals(
-    campaign_id: str = "",
-    customer_id: str = "",
-) -> dict:
-    """Read the conversion goal configuration — which conversions bid.
-
-    Returns the account-wide goals (category/origin pairs with their
-    ``biddable`` flag), the per-campaign overrides, each campaign's goal
-    configuration (``goal_config_level`` CUSTOMER or CAMPAIGN, plus the named
-    goal set in use) and the available named goal sets.
-
-    ``biddable`` is what decides whether a goal is optimized for or only
-    reported — the lever for "stop bidding on micro conversions" without
-    touching the conversion actions themselves.
-
-    Args:
-        campaign_id: Numeric campaign ID to focus on. Omit for account level
-            plus every campaign that has goal overrides.
-        customer_id: Ads account ID. Defaults to the configured account.
-    """
-    from adloop.ads.conversion_goals import get_conversion_goals as _impl
-
-    return _impl(
-        current_config(),
-        customer_id=customer_id or current_config().ads.customer_id,
-        campaign_id=campaign_id,
-    )
 
 @mcp.tool(title="Custom conversion goals", annotations=_READONLY, tags={"ads"})
 @_safe
