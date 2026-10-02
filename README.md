@@ -113,6 +113,9 @@ The best features come from real workflows. If you're using AdLoop and find your
 | `get_ai_max_settings` | AI Max knobs per campaign and ad group — `enable_ai_max`, `bundling_required`, the full `asset_automation_settings` list and each ad group's `disable_search_term_matching` |
 | `get_conversion_goals` | Conversion goal configuration — account-wide goals with their `biddable` flag, per-campaign overrides, each campaign's goal config and the named goal sets |
 | `run_gaql` | Arbitrary GAQL queries for anything else |
+| `get_custom_conversion_goals` | Custom conversion goals with their actions, plus one campaign's goal config |
+> **Custom conversion goals** — a named set of conversion actions that a campaign can be pointed at. `get_custom_conversion_goals` shows the goals with their actions and a campaign's current goal config; `draft_custom_conversion_goal` creates a set, `draft_update_custom_conversion_goal` renames or replaces its actions, `draft_assign_custom_conversion_goal` points a campaign at it and `draft_clear_custom_conversion_goal` puts the campaign back on the account-level goals. Only the goal and the campaign's goal config are touched — conversion actions, bidding and budgets stay as they are.
+
 
 > **Brand targeting** — brand criteria (brand lists, brand exclusions) target a brand's **Commercial Knowledge Graph ID**, not its display name. Use `suggest_brands` for a single name or `check_brand_names` for a shortlist to get the ID; `exact_match` marks a candidate whose name matches apart from case and punctuation, everything else is a Google suggestion. With the ID in hand, `propose_brand_list` creates the list and `attach_brand_list_to_campaigns` rolls it out. Note brand lists attach as `CampaignCriterion` rows of type `BRAND_LIST` (not as `CampaignSharedSet` like negative keyword lists), and the criterion's `negative` flag is what makes a list an exclusion or a targeting restriction.
 
@@ -234,6 +237,10 @@ All write operations follow a **draft → preview → confirm** workflow. Nothin
 | `draft_key_event` | Mark a GA4 event as a key event (conversion) — the fix for "fires but isn't tracked as a conversion" |
 | `draft_demographic_targeting` | Propose demographic criteria (age, gender, parental status, income) — exclusions by default |
 | `propose_negative_keyword_list` | Draft a shared negative keyword list (SharedSet) and attach it to a campaign — reusable across multiple campaigns |
+| `draft_custom_conversion_goal` | Create a custom conversion goal (a named set of conversion actions) |
+| `draft_update_custom_conversion_goal` | Rename a custom conversion goal and/or replace its action list (list replace, not append) |
+| `draft_assign_custom_conversion_goal` | Point a campaign at a custom conversion goal (`goal_config_level = CAMPAIGN`) |
+| `draft_clear_custom_conversion_goal` | Put a campaign back on the account-level goals (rollback) |
 | `propose_brand_list` | Draft a brand list (SharedSet of type BRANDS) from Commercial KG MIDs and optionally attach it to campaigns — `negative=true` (default) excludes the brands, `false` restricts targeting to them |
 | `add_to_brand_list` | Draft adding brands to an existing brand list |
 | `remove_from_brand_list` | Draft removing brands from a list (SharedCriteria have no status — removal is the only way) |

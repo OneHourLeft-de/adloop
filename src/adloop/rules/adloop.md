@@ -52,6 +52,7 @@ You have access to AdLoop MCP tools that connect Google Ads, Reddit Ads and Goog
 | `get_ai_max_settings` | Current AI Max state per campaign and ad group: `enable_ai_max`, `bundling_required`, the full `asset_automation_settings` list, and each ad group's `disable_search_term_matching`. Read before and after any AI Max change | `campaign_id` (optional), `customer_id` |
 | `get_conversion_goals` | Which conversions Google bids on: account-wide goals with their `biddable` flag, per-campaign overrides, each campaign's goal config (`CUSTOMER`/`CAMPAIGN` + named goal set) and the available goal sets | `campaign_id` (optional), `customer_id` |
 | `run_gaql` | Custom queries not covered by other tools | `query`, `format` (table/json/csv) |
+| `get_custom_conversion_goals` | Custom conversion goals (named sets of conversion actions) and one campaign's goal config | `campaign_id` (optional) |
 
 **Return format notes:**
 - Ads read tools automatically compute `metrics.cost` and `metrics.cpa` from `metrics.cost_micros` — no manual division needed. `metrics.currency` contains the account's currency code (auto-detected).
@@ -208,6 +209,10 @@ Reddit is a second ad platform with its own connection (own OAuth app, no develo
 | `add_negative_locations` | Propose negative geo exclusions on a campaign (does NOT add) — exclude cities/regions while keeping broader positive targets | `campaign_id`, `geo_target_ids` (numeric geo target constant IDs) |
 | `draft_key_event` | Mark a GA4 event as a key event/conversion (does NOT apply) — closes the tracking loop after attribution_check finds an untracked conversion | `event_name`, `counting_method` (ONCE_PER_EVENT for purchases / ONCE_PER_SESSION for sign-ups), `property_id` (falls back to config) |
 | `propose_negative_keyword_list` | Draft a shared negative keyword list and attach it to a campaign (does NOT create) | `campaign_id`, `list_name`, keyword list, `match_type` |
+| `draft_custom_conversion_goal` | Create a custom conversion goal from conversion actions. Refuses unknown/REMOVED actions, collapses duplicates and reports `already_exists` when the same name and action set are present. | `name`, `conversion_action_ids`, optional `status` (default ENABLED) |
+| `draft_update_custom_conversion_goal` | Rename a goal and/or REPLACE its action list (not append). Reports `no_change` when nothing differs. | `custom_conversion_goal_id`, optional `name`, optional `conversion_action_ids` |
+| `draft_assign_custom_conversion_goal` | Point a campaign at a custom goal (`goal_config_level=CAMPAIGN`). Reports `already_configured` when it already is. | `campaign_id`, `custom_conversion_goal_id` |
+| `draft_clear_custom_conversion_goal` | Put a campaign back on the account-level goals — the rollback for the assign tool. | `campaign_id` |
 | `add_to_negative_keyword_list` | Append keywords to an EXISTING shared negative keyword list (does NOT add) | `shared_set_id` (from `get_negative_keyword_lists`), keyword list, `match_type` |
 | `attach_shared_set_to_campaigns` | Attach an EXISTING shared set (e.g. shared negative keyword list) to one or more campaigns. Use after creating a campaign to inherit pre-built negatives. | `shared_set_id` (from `get_negative_keyword_lists`), `campaign_ids` list |
 | `detach_shared_set_from_campaigns` | Detach a shared set from one or more campaigns. Removes only the linkage; the shared set and its keywords stay intact. | `shared_set_id`, `campaign_ids` list |

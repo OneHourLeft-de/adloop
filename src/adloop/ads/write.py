@@ -1922,6 +1922,385 @@ def draft_update_keyword_match_types(
     return plan.to_preview()
 
 
+def _custom_goal_state(config: AdLoopConfig, customer_id: str, campaign_id: str = "") -> dict:
+    """Read the custom goals, one campaign config and the conversion actions."""
+    from adloop.ads import custom_conversion_goals as cg
+    from adloop.ads.client import get_ads_client, normalize_customer_id
+
+    cid = normalize_customer_id(customer_id or config.ads.customer_id)
+    return cg.read_state(
+        get_ads_client(config), cid, campaign_id=str(campaign_id or "")
+    )
+
+def _clean_id_list(values: list[str] | None, label: str) -> tuple[list[str], list[str]]:
+    """Trim, drop blanks, de-duplicate and require digits. Returns (errors, ids)."""
+    errors: list[str] = []
+    seen: set[str] = set()
+    cleaned: list[str] = []
+    for raw in values or []:
+        value = str(raw).strip()
+        if not value:
+            continue
+        if not value.isdigit():
+            errors.append(f"{label} '{value}' must be a numeric ID")
+            continue
+        if value in seen:
+            continue
+        seen.add(value)
+        cleaned.append(value)
+    return errors, cleaned
+
+def draft_custom_conversion_goal(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    name: str = "",
+    conversion_action_ids: list[str] | None = None,
+    status: str = "ENABLED",
+) -> dict:
+    """Draft a new custom conversion goal — returns PREVIEW.
+
+    A custom conversion goal bundles conversion actions into a named set that a
+    campaign can then be pointed at. Only the goal itself is created here —
+    conversion actions are read for validation and never modified.
+
+    status: ENABLED (default) or REMOVED.
+
+    Call ``confirm_and_apply`` with the returned plan_id to execute.
+    """
+    from adloop.ads import custom_conversion_goals as cg
+    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    try:
+        check_blocked_operation("create_custom_conversion_goal", config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+
+    from adloop.ads.client import normalize_customer_id
+
+    errors: list[str] = []
+    name = (name or "").strip()
+    if not name:
+        errors.append("name is required")
+    status = (status or cg.ENABLED).strip().upper()
+    if status not in (cg.ENABLED, cg.REMOVED):
+        errors.append("status must be ENABLED or REMOVED")
+    id_errors, action_ids = _clean_id_list(conversion_action_ids, "conversion_action_id")
+    errors.extend(id_errors)
+    if not action_ids and not id_errors:
+        errors.append("At least one conversion_action_id is required")
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    cid = normalize_customer_id(customer_id or config.ads.customer_id)
+    state = _custom_goal_state(config, customer_id)
+    action_errors, action_resources = cg.validate_conversion_actions(
+        state, cid, action_ids
+    )
+    if action_errors:
+        return {"error": "Validation failed", "details": action_errors}
+
+    for goal in state["custom_goals"]:
+        if (goal.get("name") or "").strip() != name:
+            continue
+        if set(goal.get("conversion_action_ids") or []) == set(action_ids):
+            return {
+                "status": "already_exists",
+                "custom_conversion_goal_id": goal["id"],
+                "custom_conversion_goal": cg.goal_resource_name(cid, goal["id"]),
+                "name": goal.get("name"),
+                "conversion_action_ids": sorted(goal.get("conversion_action_ids") or []),
+                "note": (
+                    "A custom conversion goal with this name and exactly these "
+                    "conversion actions already exists — nothing was planned."
+                ),
+            }
+        return {
+            "error": "Validation failed",
+            "details": [
+                f"A custom conversion goal named '{name}' already exists "
+                f"(id {goal['id']}) but contains different conversion actions: "
+                + ", ".join(sorted(goal.get("conversion_action_ids") or []))
+                + ". Use draft_update_custom_conversion_goal to change it.",
+            ],
+        }
+
+    plan = ChangePlan(
+        operation="create_custom_conversion_goal",
+        entity_type="custom_conversion_goal",
+        entity_id="",
+        customer_id=customer_id,
+        changes={
+            "name": name,
+            "status": status,
+            "conversion_action_ids": action_ids,
+            "conversion_actions": action_resources,
+        },
+    )
+    store_plan(plan)
+    return plan.to_preview()
+
+def draft_update_custom_conversion_goal(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    custom_conversion_goal_id: str = "",
+    name: str | None = None,
+    conversion_action_ids: list[str] | None = None,
+) -> dict:
+    """Draft changes to an existing custom conversion goal — returns PREVIEW.
+
+    ``name`` renames; ``conversion_action_ids`` REPLACES the whole list (it is
+    not an append). Both are optional — omitting one leaves it untouched.
+
+    Call ``confirm_and_apply`` with the returned plan_id to execute.
+    """
+    from adloop.ads import custom_conversion_goals as cg
+    from adloop.ads.client import normalize_customer_id
+    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    try:
+        check_blocked_operation("update_custom_conversion_goal", config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+
+    errors: list[str] = []
+    goal_id = str(custom_conversion_goal_id or "").strip()
+    if not goal_id:
+        errors.append("custom_conversion_goal_id is required")
+    elif not goal_id.isdigit():
+        errors.append("custom_conversion_goal_id must be a numeric ID")
+    new_name = name.strip() if isinstance(name, str) and name.strip() else None
+    id_errors, action_ids = _clean_id_list(
+        conversion_action_ids, "conversion_action_id"
+    )
+    errors.extend(id_errors)
+    if name is None and conversion_action_ids is None:
+        errors.append("Nothing to change — pass name and/or conversion_action_ids")
+    if conversion_action_ids is not None and not action_ids and not id_errors:
+        errors.append("conversion_action_ids must not be empty when provided")
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    cid = normalize_customer_id(customer_id or config.ads.customer_id)
+    state = _custom_goal_state(config, customer_id)
+    goal = cg.find_goal(state["custom_goals"], goal_id)
+    if goal is None:
+        return {
+            "error": (
+                f"Custom conversion goal {goal_id} does not exist in this account."
+            )
+        }
+    if goal.get("status") == cg.REMOVED:
+        return {"error": f"Custom conversion goal {goal_id} is REMOVED."}
+
+    action_resources: list[str] = []
+    if action_ids:
+        action_errors, action_resources = cg.validate_conversion_actions(
+            state, cid, action_ids
+        )
+        if action_errors:
+            return {"error": "Validation failed", "details": action_errors}
+
+    current_ids = sorted(goal.get("conversion_action_ids") or [])
+    target_ids = sorted(action_ids) if action_ids else current_ids
+    if (new_name is None or new_name == goal.get("name")) and target_ids == current_ids:
+        return {
+            "status": "no_change",
+            "custom_conversion_goal_id": goal_id,
+            "name": goal.get("name"),
+            "conversion_action_ids": current_ids,
+            "note": "The goal already matches the request — nothing was planned.",
+        }
+
+    changes: dict = {
+        "custom_conversion_goal_id": goal_id,
+        "name_before": goal.get("name"),
+        "conversion_action_ids_before": current_ids,
+    }
+    if new_name is not None:
+        changes["name_after"] = new_name
+    if action_ids:
+        changes["conversion_action_ids_after"] = target_ids
+        changes["conversion_actions"] = action_resources
+
+    plan = ChangePlan(
+        operation="update_custom_conversion_goal",
+        entity_type="custom_conversion_goal",
+        entity_id=goal_id,
+        customer_id=customer_id,
+        changes=changes,
+    )
+    store_plan(plan)
+    return plan.to_preview()
+
+def draft_assign_custom_conversion_goal(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    campaign_id: str = "",
+    custom_conversion_goal_id: str = "",
+) -> dict:
+    """Draft pointing one campaign at a custom conversion goal — returns PREVIEW.
+
+    Sets ``goal_config_level = CAMPAIGN`` and the goal on the campaign's
+    conversion goal config. Only the goal configuration changes — conversion
+    actions, bidding, budgets and the account-level goal settings stay as they
+    are.
+
+    Call ``confirm_and_apply`` with the returned plan_id to execute.
+    """
+    from adloop.ads import custom_conversion_goals as cg
+    from adloop.ads.client import normalize_customer_id
+    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    try:
+        check_blocked_operation("assign_custom_conversion_goal", config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+
+    errors: list[str] = []
+    campaign_id = str(campaign_id or "").strip()
+    goal_id = str(custom_conversion_goal_id or "").strip()
+    if not campaign_id.isdigit():
+        errors.append("campaign_id must be a numeric ID")
+    if not goal_id:
+        errors.append("custom_conversion_goal_id is required")
+    elif not goal_id.isdigit():
+        errors.append("custom_conversion_goal_id must be a numeric ID")
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    cid = normalize_customer_id(customer_id or config.ads.customer_id)
+    state = _custom_goal_state(config, customer_id, campaign_id=campaign_id)
+    campaign = cg.find_campaign(state, campaign_id)
+    if campaign is None:
+        return {
+            "error": (
+                f"Campaign {campaign_id} has no conversion goal configuration in "
+                "this account — check the ID."
+            )
+        }
+    if campaign.get("campaign_status") == "REMOVED":
+        return {"error": f"Campaign {campaign_id} is REMOVED."}
+    goal = cg.find_goal(state["custom_goals"], goal_id)
+    if goal is None:
+        return {
+            "error": (
+                f"Custom conversion goal {goal_id} does not exist in this account."
+            )
+        }
+    if goal.get("status") != cg.ENABLED:
+        return {
+            "error": (
+                f"Custom conversion goal {goal_id} is {goal.get('status')} — only "
+                "ENABLED goals can be assigned."
+            )
+        }
+
+    target = cg.goal_resource_name(cid, goal_id)
+    if (
+        campaign.get("goal_config_level") == cg.CAMPAIGN
+        and campaign.get("custom_conversion_goal") == target
+    ):
+        return {
+            "status": "already_configured",
+            "campaign_id": campaign_id,
+            "campaign_name": campaign.get("campaign_name"),
+            "custom_conversion_goal": target,
+            "note": "The campaign already uses exactly this goal — nothing was planned.",
+        }
+
+    plan = ChangePlan(
+        operation="assign_custom_conversion_goal",
+        entity_type="conversion_goal_campaign_config",
+        entity_id=campaign_id,
+        customer_id=customer_id,
+        changes={
+            "campaign_id": campaign_id,
+            "campaign_name": campaign.get("campaign_name"),
+            "goal_config_level_before": campaign.get("goal_config_level"),
+            "custom_conversion_goal_before": campaign.get("custom_conversion_goal") or "",
+            "goal_config_level_after": cg.CAMPAIGN,
+            "custom_conversion_goal_after": target,
+            "custom_conversion_goal_id": goal_id,
+        },
+    )
+    store_plan(plan)
+    return plan.to_preview()
+
+def draft_clear_custom_conversion_goal(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    campaign_id: str = "",
+) -> dict:
+    """Draft putting a campaign back on the account-level goals — returns PREVIEW.
+
+    Sets ``goal_config_level = CUSTOMER`` and clears the custom goal. This is
+    the rollback for ``draft_assign_custom_conversion_goal``.
+
+    Call ``confirm_and_apply`` with the returned plan_id to execute.
+    """
+    from adloop.ads import custom_conversion_goals as cg
+    from adloop.ads.client import normalize_customer_id
+    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    try:
+        check_blocked_operation("clear_custom_conversion_goal", config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+
+    campaign_id = str(campaign_id or "").strip()
+    if not campaign_id.isdigit():
+        return {
+            "error": "Validation failed",
+            "details": ["campaign_id must be a numeric ID"],
+        }
+
+    cid = normalize_customer_id(customer_id or config.ads.customer_id)
+    state = _custom_goal_state(config, customer_id, campaign_id=campaign_id)
+    campaign = cg.find_campaign(state, campaign_id)
+    if campaign is None:
+        return {
+            "error": (
+                f"Campaign {campaign_id} has no conversion goal configuration in "
+                "this account — check the ID."
+            )
+        }
+    if (
+        campaign.get("goal_config_level") == cg.CUSTOMER
+        and not campaign.get("custom_conversion_goal")
+    ):
+        return {
+            "status": "already_configured",
+            "campaign_id": campaign_id,
+            "campaign_name": campaign.get("campaign_name"),
+            "goal_config_level": cg.CUSTOMER,
+            "note": "The campaign already uses the account-level goals.",
+        }
+
+    plan = ChangePlan(
+        operation="clear_custom_conversion_goal",
+        entity_type="conversion_goal_campaign_config",
+        entity_id=campaign_id,
+        customer_id=customer_id,
+        changes={
+            "campaign_id": campaign_id,
+            "campaign_name": campaign.get("campaign_name"),
+            "goal_config_level_before": campaign.get("goal_config_level"),
+            "custom_conversion_goal_before": campaign.get("custom_conversion_goal") or "",
+            "goal_config_level_after": cg.CUSTOMER,
+            "custom_conversion_goal_after": "",
+        },
+    )
+    store_plan(plan)
+    return plan.to_preview()
+
 def draft_demographic_targeting(
     config: AdLoopConfig,
     *,
@@ -3730,6 +4109,10 @@ def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
         "update_conversion_goals": _apply_conversion_goals,
         "update_keyword_match_types": _apply_update_keyword_match_types,
         "add_demographic_criteria": _apply_add_demographic_criteria,
+        "create_custom_conversion_goal": _apply_create_custom_conversion_goal,
+        "update_custom_conversion_goal": _apply_update_custom_conversion_goal,
+        "assign_custom_conversion_goal": _apply_assign_custom_conversion_goal,
+        "clear_custom_conversion_goal": _apply_clear_custom_conversion_goal,
         "pause_entity": _apply_status_change,
         "enable_entity": _apply_status_change,
         "remove_entity": _apply_remove,
@@ -5584,3 +5967,137 @@ def _apply_update_keyword_match_types(
         if message:
             out["partial_failure_message"] = message
     return out
+
+
+def _custom_goal_readback(client: object, cid: str, goal_id: str) -> dict:
+    from adloop.ads import custom_conversion_goals as cg
+
+    state = cg.read_state(client, cid)
+    goal = cg.find_goal(state["custom_goals"], goal_id)
+    return {
+        "custom_conversion_goal": goal,
+        "custom_conversion_goals": state["custom_goals"],
+        "errors": state["errors"],
+    }
+
+def _campaign_config_readback(client: object, cid: str, campaign_id: str) -> dict:
+    from adloop.ads import custom_conversion_goals as cg
+
+    state = cg.read_state(client, cid, campaign_id=campaign_id)
+    return {
+        "campaign": cg.find_campaign(state, campaign_id),
+        "errors": state["errors"],
+    }
+
+def _apply_create_custom_conversion_goal(
+    client: object, cid: str, changes: dict
+) -> dict:
+    """Create the custom conversion goal, then read it back."""
+    service = client.get_service("CustomConversionGoalService")
+    operation = client.get_type("CustomConversionGoalOperation")
+    goal = operation.create
+    goal.name = changes["name"]
+    goal.conversion_actions.extend(changes["conversion_actions"])
+    if changes.get("status"):
+        goal.status = getattr(
+            client.enums.CustomConversionGoalStatusEnum, changes["status"]
+        )
+
+    response = service.mutate_custom_conversion_goals(
+        customer_id=cid, operations=[operation]
+    )
+    resource_name = response.results[0].resource_name
+    goal_id = resource_name.rsplit("/", 1)[-1]
+    return {
+        "custom_conversion_goal": resource_name,
+        "custom_conversion_goal_id": goal_id,
+        "conversion_action_ids": changes["conversion_action_ids"],
+        "readback": _custom_goal_readback(client, cid, goal_id),
+    }
+
+def _apply_update_custom_conversion_goal(
+    client: object, cid: str, changes: dict
+) -> dict:
+    """Rename and/or replace the action list of a custom conversion goal."""
+    from google.protobuf import field_mask_pb2
+
+    from adloop.ads import custom_conversion_goals as cg
+
+    service = client.get_service("CustomConversionGoalService")
+    operation = client.get_type("CustomConversionGoalOperation")
+    goal = operation.update
+    goal.resource_name = cg.goal_resource_name(cid, changes["custom_conversion_goal_id"])
+
+    paths: list[str] = []
+    if changes.get("name_after"):
+        goal.name = changes["name_after"]
+        paths.append("name")
+    if changes.get("conversion_actions"):
+        goal.conversion_actions.extend(changes["conversion_actions"])
+        paths.append("conversion_actions")
+    operation.update_mask = field_mask_pb2.FieldMask(paths=paths)
+
+    response = service.mutate_custom_conversion_goals(
+        customer_id=cid, operations=[operation]
+    )
+    return {
+        "custom_conversion_goal": response.results[0].resource_name,
+        "update_mask": paths,
+        "readback": _custom_goal_readback(
+            client, cid, changes["custom_conversion_goal_id"]
+        ),
+    }
+
+def _conversion_goal_campaign_config_update(
+    client: object, cid: str, campaign_id: str, level: str, goal_resource: str
+) -> dict:
+    """Write goal_config_level + custom_conversion_goal for one campaign."""
+    from google.protobuf import field_mask_pb2
+
+    from adloop.ads import custom_conversion_goals as cg
+
+    service = client.get_service("ConversionGoalCampaignConfigService")
+    operation = client.get_type("ConversionGoalCampaignConfigOperation")
+    config = operation.update
+    config.resource_name = cg.campaign_config_resource_name(cid, campaign_id)
+    config.goal_config_level = getattr(client.enums.GoalConfigLevelEnum, level)
+    config.custom_conversion_goal = goal_resource
+    operation.update_mask = field_mask_pb2.FieldMask(
+        paths=["goal_config_level", "custom_conversion_goal"]
+    )
+
+    response = service.mutate_conversion_goal_campaign_configs(
+        customer_id=cid, operations=[operation]
+    )
+    return {
+        "conversion_goal_campaign_config": response.results[0].resource_name
+        if response.results
+        else cg.campaign_config_resource_name(cid, campaign_id),
+        "goal_config_level": level,
+        "custom_conversion_goal": goal_resource,
+    }
+
+def _apply_assign_custom_conversion_goal(
+    client: object, cid: str, changes: dict
+) -> dict:
+    """Point the campaign at the custom goal, then read the config back."""
+    from adloop.ads import custom_conversion_goals as cg
+
+    outcome = _conversion_goal_campaign_config_update(
+        client, cid, changes["campaign_id"], cg.CAMPAIGN,
+        changes["custom_conversion_goal_after"],
+    )
+    outcome["readback"] = _campaign_config_readback(client, cid, changes["campaign_id"])
+    return outcome
+
+def _apply_clear_custom_conversion_goal(
+    client: object, cid: str, changes: dict
+) -> dict:
+    """Put the campaign back on the account-level goals, then read it back."""
+    from adloop.ads import custom_conversion_goals as cg
+
+    outcome = _conversion_goal_campaign_config_update(
+        client, cid, changes["campaign_id"], cg.CUSTOMER, ""
+    )
+    outcome["readback"] = _campaign_config_readback(client, cid, changes["campaign_id"])
+    return outcome
