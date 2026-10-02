@@ -46,6 +46,9 @@ You have access to AdLoop MCP tools that connect Google Ads, Reddit Ads and Goog
 | `get_detailed_asset_performance` | Top-performing asset combinations — which headline+description+image combos Google selects most | `campaign_id` (optional) |
 | `get_audience_performance` | Audience segment metrics — remarketing, in-market, affinity, demographics | `date_range_start`, `date_range_end`, `campaign_id` (optional) |
 | `get_demographic_targeting` | List current demographic criteria (age/gender/parental status/income) on an ad group or campaign — returns each criterion's `remove_id` for use with `remove_entity` | exactly one of `ad_group_id` or `campaign_id` |
+| `get_brand_lists` | List brand lists (SharedSets of type BRANDS) before creating a new one — reuse beats duplication | (none) |
+| `get_brand_list_brands` | Contents of a brand list, with `entity_id` (the MID) and `criterion_id` (needed for removal) | `shared_set_id` (required) |
+| `get_brand_list_campaigns` | Which campaigns a brand list is attached to, and whether each attachment excludes (`role: excluded`) or targets (`role: targeted`) | `shared_set_id` (optional) |
 | `run_gaql` | Custom queries not covered by other tools | `query`, `format` (table/json/csv) |
 
 **Return format notes:**
@@ -206,6 +209,11 @@ Reddit is a second ad platform with its own connection (own OAuth app, no develo
 | `add_to_negative_keyword_list` | Append keywords to an EXISTING shared negative keyword list (does NOT add) | `shared_set_id` (from `get_negative_keyword_lists`), keyword list, `match_type` |
 | `attach_shared_set_to_campaigns` | Attach an EXISTING shared set (e.g. shared negative keyword list) to one or more campaigns. Use after creating a campaign to inherit pre-built negatives. | `shared_set_id` (from `get_negative_keyword_lists`), `campaign_ids` list |
 | `detach_shared_set_from_campaigns` | Detach a shared set from one or more campaigns. Removes only the linkage; the shared set and its keywords stay intact. | `shared_set_id`, `campaign_ids` list |
+| `propose_brand_list` | Draft a brand list (SharedSet of type BRANDS) and optionally attach it. Always resolve names with `suggest_brands` first — only the Commercial KG MID can be written. | `list_name`, `brand_ids` (MIDs from `suggest_brands`), optional `campaign_ids`, optional `negative` (default True = exclusion) |
+| `add_to_brand_list` | Append brands to an EXISTING brand list | `shared_set_id` (from `get_brand_lists`), `brand_ids` |
+| `remove_from_brand_list` | Remove brands from a list. SharedCriteria have no status, so this is a real removal — nothing to pause. | `shared_set_id`, `criterion_ids` (from `get_brand_list_brands`) |
+| `attach_brand_list_to_campaigns` | Attach an existing brand list to campaigns as `CampaignCriterion.brand_list` — NOT a `CampaignSharedSet` linkage. `negative=True` excludes, `False` restricts targeting. | `shared_set_id`, `campaign_ids` list, optional `negative` (default True) |
+| `detach_brand_list_from_campaigns` | Remove the brand-list criterion from campaigns; the list itself stays. Campaigns without the list come back as `not_attached`. | `shared_set_id`, `campaign_ids` list |
 | `draft_demographic_targeting` | Propose demographic criteria (age, gender, parental status, income range) at ad group or campaign level. Defaults to EXCLUSION (`negative=True`). | exactly one of `ad_group_id` or `campaign_id`, at least one of `age_ranges`/`genders`/`parental_statuses`/`income_ranges`, optional `negative` (default True) |
 | `pause_entity` | Propose pausing campaign/ad group/ad/keyword | `entity_type`, `entity_id` |
 | `enable_entity` | Propose enabling paused entity | `entity_type`, `entity_id` |
