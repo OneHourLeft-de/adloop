@@ -88,11 +88,16 @@ def clear_pending_plans():
 
 @pytest.fixture(autouse=True)
 def stub_url_validation(monkeypatch):
-    """Default: every URL passes. Tests can override to inject failures."""
+    """Default: every URL passes. Tests can override to inject failures.
+
+    The stub mirrors the real contract — ``_validate_urls`` returns
+    ``(errors, warnings)``. Returning a bare dict here is what hid the
+    "'tuple' object has no attribute 'get'" bug in the URL-only update path.
+    """
     monkeypatch.setattr(
         write,
         "_validate_urls",
-        lambda urls, timeout=10: {u: None for u in urls},
+        lambda urls, timeout=10: ({u: None for u in urls}, {}),
     )
 
 
@@ -196,7 +201,7 @@ class TestValidation:
         monkeypatch.setattr(
             write,
             "_validate_urls",
-            lambda urls, timeout=10: {u: "HTTP 404" for u in urls},
+            lambda urls, timeout=10: ({u: "HTTP 404" for u in urls}, {}),
         )
         result = write.update_responsive_search_ad(
             config,
@@ -226,7 +231,7 @@ class TestValidation:
 
         def spy_validate(urls, timeout=10):
             called["count"] += 1
-            return {u: None for u in urls}
+            return ({u: None for u in urls}, {})
 
         monkeypatch.setattr(write, "_validate_urls", spy_validate)
         result = write.update_responsive_search_ad(
@@ -1149,3 +1154,73 @@ class TestHeadlineDescriptionIntegration:
             "Replacement Headline Two",
             "Replacement Headline Three",
         ]
+
+
+class TestUrlOnlyUpdateRegression:
+    """A URL-only update must produce a plan — it used to raise before that.
+
+    `_validate_urls` returns (errors, warnings); the update path treated it as
+    a dict, so every final_url change failed with
+    "'tuple' object has no attribute 'get'". The autouse stub above now mirrors
+    the real contract, which is what keeps this from silently regressing.
+    """
+
+    def test_final_url_only_creates_a_plan(self, config):
+        result = write.update_responsive_search_ad(
+            config,
+            customer_id="1234567890",
+            ad_id="826727272959",
+            final_url="https://www.onehourleft.de/escape-rooms/",
+        )
+
+        assert "error" not in result, result
+        assert result["operation"] == "update_responsive_search_ad"
+        assert result["changes"]["ad_id"] == "826727272959"
+        assert result["changes"]["final_url"] == (
+            "https://www.onehourleft.de/escape-rooms/"
+        )
+        # Creative and paths stay out of the plan entirely.
+        assert set(result["changes"]) == {"ad_id", "final_url"}
+
+    def test_final_url_and_path_together(self, config):
+        result = write.update_responsive_search_ad(
+            config,
+            customer_id="1234567890",
+            ad_id="999",
+            final_url="https://www.onehourleft.de/grosse-gruppen/",
+            path1="Gruppen",
+        )
+
+        assert "error" not in result, result
+        assert result["changes"]["path1"] == "Gruppen"
+        assert result["changes"]["final_url"] == (
+            "https://www.onehourleft.de/grosse-gruppen/"
+        )
+
+    def test_url_warning_is_surfaced_in_the_preview(self, config, monkeypatch):
+        monkeypatch.setattr(
+            write,
+            "_validate_urls",
+            lambda urls, timeout=10: ({u: None for u in urls},
+                                      {u: "HTTP 429" for u in urls}),
+        )
+
+        result = write.update_responsive_search_ad(
+            config,
+            customer_id="1234567890",
+            ad_id="999",
+            final_url="https://example.com/x",
+        )
+
+        assert any("HTTP 429" in w for w in result.get("warnings", []))
+
+    def test_creative_update_keeps_its_own_warning(self, config):
+        result = write.update_responsive_search_ad(
+            config,
+            customer_id="1234567890",
+            ad_id="999",
+            headlines=["Eins", "Zwei", "Drei"],
+        )
+
+        assert any("learning" in w.lower() or "policy" in w.lower()
+                   for w in result.get("warnings", []))
