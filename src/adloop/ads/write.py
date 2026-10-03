@@ -1243,7 +1243,11 @@ def update_ad_group(
     max_cpc: float = 0,
 ) -> dict:
     """Draft an ad group update for name and manual CPC bid."""
-    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.guards import (
+        SafetyViolation,
+        check_bid_increase,
+        check_blocked_operation,
+    )
     from adloop.safety.preview import ChangePlan, store_plan
 
     try:
@@ -1287,6 +1291,12 @@ def update_ad_group(
                     f"target governs spend under automated bidding. "
                     f"No change made."
                 )
+        else:
+            current_bid = _current_ad_group_cpc_bid(config, customer_id, ad_group_id)
+            try:
+                check_bid_increase(current_bid or 0, max_cpc, config.safety)
+            except SafetyViolation as e:
+                errors.append(str(e))
 
     has_any_change = bool(ad_group_name.strip() or max_cpc)
     if not has_any_change:
@@ -1585,6 +1595,7 @@ def update_campaign(
     """
     from adloop.safety.guards import (
         SafetyViolation,
+        check_bid_increase,
         check_blocked_operation,
         check_budget_cap,
     )
@@ -1639,6 +1650,14 @@ def update_campaign(
             errors.append("campaign_id was not found")
         elif strategy_for_cap != "TARGET_SPEND":
             errors.append("max_cpc requires TARGET_SPEND bidding_strategy")
+        else:
+            # Only a ceiling that already exists has a baseline; a campaign
+            # switching to Maximize Clicks has none to compare against.
+            current_ceiling = _current_campaign_cpc_ceiling(config, customer_id, campaign_id)
+            try:
+                check_bid_increase(current_ceiling or 0, max_cpc, config.safety)
+            except SafetyViolation as e:
+                errors.append(str(e))
 
     has_any_change = any([
         bs,
@@ -2019,39 +2038,49 @@ def confirm_and_apply(
 
     if dry_run:
         preflight_checks: dict | None = None
-        if is_reddit:
-            # Reddit has no validate-only mode; the dry run re-reads the
-            # target and re-runs the safety caps against live values. A
-            # failed preflight leaves dry_run_result unset so two-phase
-            # apply keeps refusing the real write.
-            from adloop.reddit.write import preflight
+        validation: dict | None = None
+        # Either way a failed check leaves dry_run_result unset, so two-phase
+        # apply keeps refusing the real write.
+        try:
+            if is_reddit:
+                # Reddit has no validate-only mode; the dry run re-reads the
+                # target and re-runs the safety caps against live values.
+                from adloop.reddit.write import preflight
 
-            try:
                 preflight_checks = preflight(config, plan)
-            except Exception as e:
-                error_message = _extract_error_message(e)
-                log_mutation(
-                    config.safety.log_file,
-                    operation=plan.operation,
-                    customer_id=plan.customer_id,
-                    entity_type=plan.entity_type,
-                    entity_id=plan.entity_id,
-                    changes=plan.changes,
-                    dry_run=True,
-                    result="dry_run_failed",
-                    error=error_message,
-                )
-                return {
-                    "status": "DRY_RUN_FAILED",
-                    "plan_id": plan.plan_id,
-                    "operation": plan.operation,
-                    "error": error_message,
-                    "message": (
-                        "The dry run re-checked the target against Reddit and "
-                        "found a problem; nothing was sent. Fix the cause and "
-                        "draft again."
-                    ),
-                }
+            elif plan.operation != "create_key_event":
+                # Google Ads checks the exact mutates with validate_only=True
+                # and executes nothing.
+                validation = _validate_with_google(config, plan)
+        except Exception as e:
+            error_message = _extract_error_message(e)
+            log_mutation(
+                config.safety.log_file,
+                operation=plan.operation,
+                customer_id=plan.customer_id,
+                entity_type=plan.entity_type,
+                entity_id=plan.entity_id,
+                changes=plan.changes,
+                dry_run=True,
+                result="dry_run_failed",
+                error=error_message,
+            )
+            checked_against = (
+                "re-checked the target against Reddit"
+                if is_reddit
+                else "sent the change to Google Ads in validate-only mode"
+            )
+            return {
+                "status": "DRY_RUN_FAILED",
+                "plan_id": plan.plan_id,
+                "operation": plan.operation,
+                "error": error_message,
+                "message": (
+                    f"The dry run {checked_against} and found a problem; "
+                    "nothing was changed. The real apply would fail the same "
+                    "way. Fix the cause and draft again."
+                ),
+            }
         log_mutation(
             config.safety.log_file,
             operation=plan.operation,
@@ -2085,6 +2114,18 @@ def confirm_and_apply(
                 "Reddit Ads has no validate-only mode: the dry run re-read the "
                 "target and re-checked the safety caps; nothing was sent."
             )
+        if validation is not None:
+            response["checks"] = validation
+            response["note"] = (
+                "Google Ads validated this exact change (validate_only) and "
+                "executed nothing."
+            )
+            if validation["skipped_calls"]:
+                response["note"] += (
+                    f" {validation['skipped_calls']} later step(s) build on "
+                    "objects an earlier step would create, so Google could "
+                    "only validate the step(s) before them."
+                )
         if forced_by_config:
             # The caller passed dry_run=false but safety.require_dry_run
             # forced it back on. Tell them exactly why and how to unlock
@@ -2266,6 +2307,38 @@ def _existing_negative_geo_exclusions(
         elif gtc:
             ids.append(gtc)
     return ids
+
+
+def _current_ad_group_cpc_bid(
+    config: AdLoopConfig, customer_id: str, ad_group_id: str
+) -> float | None:
+    """The ad group's current manual CPC bid in account currency, or None."""
+    from adloop.ads.gaql import execute_query
+
+    rows = execute_query(config, customer_id, f"""
+        SELECT ad_group.cpc_bid_micros
+        FROM ad_group
+        WHERE ad_group.id = {ad_group_id}
+        LIMIT 1
+    """)
+    micros = rows[0].get("ad_group.cpc_bid_micros") if rows else None
+    return int(micros) / 1_000_000 if micros else None
+
+
+def _current_campaign_cpc_ceiling(
+    config: AdLoopConfig, customer_id: str, campaign_id: str
+) -> float | None:
+    """The campaign's current Maximize Clicks CPC ceiling, or None if unset."""
+    from adloop.ads.gaql import execute_query
+
+    rows = execute_query(config, customer_id, f"""
+        SELECT campaign.target_spend.cpc_bid_ceiling_micros
+        FROM campaign
+        WHERE campaign.id = {campaign_id}
+        LIMIT 1
+    """)
+    micros = rows[0].get("campaign.target_spend.cpc_bid_ceiling_micros") if rows else None
+    return int(micros) / 1_000_000 if micros else None
 
 
 def _ad_group_campaign_bidding_strategy(
@@ -2862,8 +2935,20 @@ def _extract_resource_name(resp: object) -> str:
     return ""
 
 
-def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
-    """Dispatch to the right API call based on plan.operation."""
+def _validate_with_google(config: AdLoopConfig, plan: object) -> dict:
+    """Send a Google Ads plan with validate_only=True; raises if Google rejects it."""
+    return _execute_plan(config, plan, validate_only=True)
+
+
+def _execute_plan(
+    config: AdLoopConfig, plan: object, *, validate_only: bool = False
+) -> dict:
+    """Dispatch to the right API call based on plan.operation.
+
+    With ``validate_only`` the plan's Google Ads mutates are sent with
+    ``validate_only=True`` (nothing executes) and the return value reports
+    how many calls Google validated; any rejection raises.
+    """
     from adloop.ads.client import get_ads_client, normalize_customer_id
 
     # Reddit plans have their own executors and never touch Google: the
@@ -2884,6 +2969,25 @@ def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
     client = get_ads_client(config)
     cid = normalize_customer_id(plan.customer_id)
 
+    if validate_only:
+        from adloop.ads.validate_only import ValidateOnlyClient
+
+        validator = ValidateOnlyClient(client)
+        result = _dispatch_ads_plan(validator, cid, plan)
+        # Multi-step applies catch their own errors and report them in the
+        # result instead of raising; in a dry run that is still a failure.
+        if isinstance(result, dict) and result.get("error"):
+            raise ValueError(result["error"])
+        return {
+            "validated_calls": validator.validated_calls,
+            "skipped_calls": validator.skipped_calls,
+        }
+
+    return _dispatch_ads_plan(client, cid, plan)
+
+
+def _dispatch_ads_plan(client: object, cid: str, plan: object) -> dict:
+    """Run a Google Ads plan against ``client`` (real or validate-only)."""
     # Conversion-action CRUD lives in its own module; import lazily so the
     # dispatch table (and this module) don't take the dependency at import time.
     from adloop.ads.conversion_actions import (

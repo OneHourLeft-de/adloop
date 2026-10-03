@@ -110,8 +110,13 @@ def _build_orchestration_instructions() -> str:
         "`dry_run=false` after the user explicitly approves the preview. "
         "`require_dry_run` in config can override this.\n"
         "- Respect the config's `max_daily_budget` cap.\n"
-        "- New campaigns, ad groups, RSAs and Reddit ads are created PAUSED. "
+        "- New Google Ads campaigns and RSAs, and every new Reddit campaign, "
+        "ad group and ad, are created PAUSED. A new Google Ads ad group is "
+        "enabled but cannot serve until one of its (paused) ads is enabled. "
         "The user must enable them after review.\n"
+        "- A Google Ads dry run sends the exact change to Google with "
+        "validate_only (nothing executes); DRY_RUN_FAILED means the real "
+        "apply would fail the same way.\n"
         "- One change at a time — don't batch unrelated writes.\n\n"
         "PRE-WRITE CHECKS (before any `draft_*`):\n"
         "- BROAD match keywords require Smart Bidding (MAXIMIZE_CONVERSIONS, "
@@ -2273,9 +2278,15 @@ def confirm_and_apply(
     DRY_RUN_REQUIRED until this plan_id has completed one dry_run=true
     pass. Run the dry run, show it to the user, then apply for real.
 
+    Google Ads plans: the dry run sends the exact mutates to Google with
+    validate_only=True, so Google checks the change and executes nothing
+    (`checks` counts the validated calls). Steps that build on an object an
+    earlier step would create cannot be validated and are counted as skipped.
+
     Reddit plans: Reddit has no validate-only mode, so the dry run re-reads
-    the target entity and re-checks the safety caps (returned as `checks`);
-    a DRY_RUN_FAILED result means the real apply would also fail.
+    the target entity and re-checks the safety caps (returned as `checks`).
+
+    Either way, a DRY_RUN_FAILED result means the real apply would also fail.
 
     The plan_id comes from a prior draft_* or pause/enable tool call.
     """

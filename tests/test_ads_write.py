@@ -196,6 +196,7 @@ def test_update_ad_group_max_cpc_allowed_for_manual_cpc(config, monkeypatch):
         "_ad_group_campaign_bidding_strategy",
         lambda *_args: "MANUAL_CPC",
     )
+    monkeypatch.setattr(write, "_current_ad_group_cpc_bid", lambda *_args: 1.00)
 
     result = write.update_ad_group(
         config,
@@ -207,6 +208,32 @@ def test_update_ad_group_max_cpc_allowed_for_manual_cpc(config, monkeypatch):
     assert result.get("error") is None, result
     assert result["operation"] == "update_ad_group"
     assert result["changes"]["max_cpc"] == 1.50
+
+
+def test_update_ad_group_refuses_a_bid_raise_beyond_the_cap(config, monkeypatch):
+    """max_bid_increase_pct (default 100%) applies to Google Ads bids too."""
+    monkeypatch.setattr(
+        write, "_ad_group_campaign_bidding_strategy", lambda *_args: "MANUAL_CPC"
+    )
+    monkeypatch.setattr(write, "_current_ad_group_cpc_bid", lambda *_args: 0.50)
+
+    result = write.update_ad_group(
+        config, customer_id="123-456-7890", ad_group_id="2002", max_cpc=1.50
+    )
+
+    assert result["error"] == "Validation failed"
+    assert "Bid increase 200% exceeds maximum 100%" in result["details"][0]
+
+
+def test_current_ad_group_cpc_bid_reads_micros(config, monkeypatch):
+    monkeypatch.setattr(
+        "adloop.ads.gaql.execute_query",
+        lambda *_a, **_kw: [{"ad_group.cpc_bid_micros": 1_500_000}],
+    )
+    assert write._current_ad_group_cpc_bid(config, "1234567890", "2002") == 1.5
+
+    monkeypatch.setattr("adloop.ads.gaql.execute_query", lambda *_a, **_kw: [])
+    assert write._current_ad_group_cpc_bid(config, "1234567890", "2002") is None
 
 
 def test_draft_campaign_normalizes_display_expansion_alias(config):
@@ -277,6 +304,7 @@ def test_update_campaign_normalizes_display_alias(config):
 
 def test_update_campaign_allows_target_spend_cpc_cap(config, monkeypatch):
     monkeypatch.setattr(write, "_campaign_bidding_strategy", lambda *_args: "TARGET_SPEND")
+    monkeypatch.setattr(write, "_current_campaign_cpc_ceiling", lambda *_args: 1.00)
 
     result = write.update_campaign(
         config,
@@ -286,6 +314,30 @@ def test_update_campaign_allows_target_spend_cpc_cap(config, monkeypatch):
     )
 
     assert result["changes"]["max_cpc"] == 1.25
+
+
+def test_update_campaign_refuses_a_ceiling_raise_beyond_the_cap(config, monkeypatch):
+    monkeypatch.setattr(write, "_campaign_bidding_strategy", lambda *_args: "TARGET_SPEND")
+    monkeypatch.setattr(write, "_current_campaign_cpc_ceiling", lambda *_args: 0.40)
+
+    result = write.update_campaign(
+        config, customer_id="123-456-7890", campaign_id="1001", max_cpc=1.25
+    )
+
+    assert result["error"] == "Validation failed"
+    assert any("exceeds maximum 100%" in d for d in result["details"])
+
+
+def test_update_campaign_first_ceiling_has_no_baseline(config, monkeypatch):
+    """Switching to Maximize Clicks sets a ceiling where none existed."""
+    monkeypatch.setattr(write, "_campaign_bidding_strategy", lambda *_args: "TARGET_SPEND")
+    monkeypatch.setattr(write, "_current_campaign_cpc_ceiling", lambda *_args: None)
+
+    result = write.update_campaign(
+        config, customer_id="123-456-7890", campaign_id="1001", max_cpc=5.00
+    )
+
+    assert result["changes"]["max_cpc"] == 5.00
 
 
 def test_update_campaign_rejects_max_cpc_for_non_target_spend(config, monkeypatch):

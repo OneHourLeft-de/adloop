@@ -61,8 +61,10 @@ by hand, and never state tool counts in prose anywhere (they rot).
 - Two-step writes: draft -> preview -> confirm_and_apply
 - dry_run=true by default; require_dry_run in config overrides
 - two_phase_apply in config: real applies refused (DRY_RUN_REQUIRED) until the plan had one dry-run pass; always on for cloud tenants
-- Budget caps enforced; new campaigns/ads created as PAUSED
-- Broad Match + Manual CPC automatically blocked
+- Google Ads dry runs send the exact mutates with validate_only=True (nothing executes)
+- Budget caps enforced; bid raises capped by max_bid_increase_pct (Google Ads and Reddit)
+- New campaigns/ads created as PAUSED; new Google Ads ad groups are enabled but cannot serve until an ad is enabled
+- Broad Match + Manual CPC refused when creating campaigns, flagged when adding keywords
 - All mutations logged to ~/.adloop/audit.log
 
 ## Key Files

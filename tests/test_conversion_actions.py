@@ -591,10 +591,10 @@ class TestMCPRegistration:
         assert "conversion_action_id" in required
 
     def test_dispatch_routes(self):
-        """_execute_plan must map the three CRUD operations to the module's
+        """The Ads dispatch must map the three CRUD operations to the module's
         apply handlers (same dispatch-dict style as the other Ads writes)."""
         import inspect
-        src = inspect.getsource(write._execute_plan)
+        src = inspect.getsource(write._dispatch_ads_plan)
         assert '"create_conversion_action": _apply_create_conversion_action' in src
         assert '"update_conversion_action": _apply_update_conversion_action' in src
         assert '"remove_conversion_action": _apply_remove_conversion_action' in src
