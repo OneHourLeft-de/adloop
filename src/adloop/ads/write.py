@@ -669,8 +669,13 @@ def update_responsive_search_ad(
     if errors:
         return {"error": "Validation failed", "details": errors}
 
+    url_warnings_found: list[str] = []
     if has_url_change:
-        url_check = _validate_urls([final_url])
+        # _validate_urls returns (errors, warnings) — the same contract the
+        # create path and the sitelink path already unpack. Treating the tuple
+        # as a dict made every URL-only update fail with
+        # "'tuple' object has no attribute 'get'" before a plan existed.
+        url_check, url_warnings = _validate_urls([final_url])
         if url_check.get(final_url):
             return {
                 "error": "URL validation failed",
@@ -679,6 +684,10 @@ def update_responsive_search_ad(
                     f"{url_check[final_url]}. Ads MUST point to working URLs."
                 ],
             }
+        if url_warnings.get(final_url):
+            url_warnings_found.append(
+                f"final_url '{final_url}': {url_warnings[final_url]}"
+            )
 
     changes: dict = {"ad_id": str(ad_id)}
     if has_url_change:
@@ -703,8 +712,10 @@ def update_responsive_search_ad(
     preview = plan.to_preview()
     # Only warn when the creative text is actually being replaced — URL/path
     # edits do not trigger the learning reset or policy re-review.
+    if url_warnings_found:
+        preview.setdefault("warnings", []).extend(url_warnings_found)
     if has_headlines_change or has_descriptions_change:
-        preview["warnings"] = [_RSA_TEXT_UPDATE_WARNING]
+        preview.setdefault("warnings", []).append(_RSA_TEXT_UPDATE_WARNING)
     return preview
 
 
