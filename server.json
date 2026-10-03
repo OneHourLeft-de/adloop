@@ -2,8 +2,8 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "com.getadloop/adloop",
   "title": "AdLoop",
-  "description": "Google Ads, GA4 and Tag Manager in your AI client, with a preview before every change.",
-  "version": "0.14.0",
+  "description": "Google Ads, Reddit Ads, GA4 and Tag Manager in your AI client, with a preview before every change.",
+  "version": "0.16.0",
   "websiteUrl": "https://getadloop.com",
   "repository": {
     "url": "https://github.com/kLOsk/adloop",
@@ -13,6 +13,16 @@
     {
       "type": "streamable-http",
       "url": "https://mcp.getadloop.com/mcp"
+    }
+  ],
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "adloop",
+      "version": "0.16.0",
+      "transport": {
+        "type": "stdio"
+      }
     }
   ]
 }
