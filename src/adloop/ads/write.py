@@ -1405,6 +1405,9 @@ def remove_entity(
         entity_id=entity_id,
         customer_id=customer_id,
         changes={"action": "REMOVE"},
+        # Removal is irreversible; the preview asks for a second explicit
+        # confirmation, as Reddit removals already did.
+        requires_double_confirm=True,
     )
     store_plan(plan)
     return plan.to_preview()

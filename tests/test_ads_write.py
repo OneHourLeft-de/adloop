@@ -969,6 +969,21 @@ def test_remove_entity_accepts_shared_criterion_type(config):
     assert result["status"] == "PENDING_CONFIRMATION"
 
 
+def test_removals_ask_for_double_confirmation(config):
+    """Removal is irreversible on Google Ads too, not only on Reddit."""
+    from adloop.ads.conversion_actions import draft_remove_conversion_action
+
+    entity = write.remove_entity(
+        config, customer_id="123-456-7890", entity_type="campaign", entity_id="42"
+    )
+    conversion = draft_remove_conversion_action(
+        config, customer_id="123-456-7890", conversion_action_id="77"
+    )
+
+    assert entity["requires_double_confirm"] is True
+    assert conversion["requires_double_confirm"] is True
+
+
 def test_remove_entity_normalizes_commas_to_tildes(config):
     """remove_entity should accept commas and normalize to tildes in the stored plan."""
     result = write.remove_entity(

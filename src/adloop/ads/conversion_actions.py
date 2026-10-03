@@ -430,6 +430,7 @@ def draft_remove_conversion_action(
         entity_id=str(conversion_action_id),
         customer_id=customer_id,
         changes={"conversion_action_id": str(conversion_action_id)},
+        requires_double_confirm=True,
     )
     store_plan(plan)
     preview = plan.to_preview()
