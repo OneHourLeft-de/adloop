@@ -2685,3 +2685,28 @@ def test_search_campaigns_get_neither_the_refusal_nor_the_shell_warning():
 
     assert not any("Performance Max" in e for e in errors)
     assert not any("shell only" in w for w in warnings)
+
+
+def test_extract_error_message_reads_proto_plus_failures():
+    """The Ads client returns proto-plus failures; WhichOneof is not on them.
+
+    Seen live: a validate-only dry run against a missing ad group surfaced a
+    raw gRPC dump instead of the error code and message.
+    """
+    from google.ads.googleads.errors import GoogleAdsException
+    from google.ads.googleads.v25.errors.types import errors as E
+    from google.ads.googleads.v25.errors.types import mutate_error as M
+
+    error = E.GoogleAdsError(
+        error_code=E.ErrorCode(
+            mutate_error=M.MutateErrorEnum.MutateError.RESOURCE_NOT_FOUND
+        ),
+        message="Resource was not found.",
+        trigger={"int64_value": 999999999999},
+    )
+    exc = GoogleAdsException(None, None, E.GoogleAdsFailure(errors=[error]), "req123")
+
+    assert write._extract_error_message(exc) == (
+        "[mutate_error=RESOURCE_NOT_FOUND] Resource was not found. "
+        "(trigger: 999999999999) [request_id=req123]"
+    )

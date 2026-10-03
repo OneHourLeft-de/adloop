@@ -1987,14 +1987,23 @@ def _extract_error_message(exc: Exception) -> str:
         if isinstance(exc, GoogleAdsException) and exc.failure:
             parts = []
             for error in exc.failure.errors:
-                error_code = error.error_code
-                code_field = error_code.WhichOneof("error_code")
-                code_value = getattr(error_code, code_field) if code_field else "UNKNOWN"
-                line = f"[{code_field}={code_value.name if hasattr(code_value, 'name') else code_value}]"
-                if error.message:
-                    line += f" {error.message}"
-                if error.trigger and error.trigger.string_value:
-                    line += f" (trigger: {error.trigger.string_value})"
+                # The client returns proto-plus messages, on which WhichOneof
+                # does not exist; read the underlying protobuf instead.
+                pb = type(error).pb(error) if hasattr(type(error), "pb") else error
+                code_field = pb.error_code.WhichOneof("error_code")
+                code_name = "UNKNOWN"
+                if code_field:
+                    number = getattr(pb.error_code, code_field)
+                    enum = pb.error_code.DESCRIPTOR.fields_by_name[code_field].enum_type
+                    value = enum.values_by_number.get(number)
+                    code_name = value.name if value else str(number)
+                line = f"[{code_field}={code_name}]"
+                if pb.message:
+                    line += f" {pb.message}"
+                if pb.HasField("trigger"):
+                    kind = pb.trigger.WhichOneof("value")
+                    if kind:
+                        line += f" (trigger: {getattr(pb.trigger, kind)})"
                 parts.append(line)
             if parts:
                 msg = "; ".join(parts)
