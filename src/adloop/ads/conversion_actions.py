@@ -1260,6 +1260,7 @@ class PartialUploadError(RuntimeError):
         resume_from_line: object,
         dry_run: bool,
         row_errors: list[dict] | None = None,
+        unknown_status: bool = False,
     ) -> None:
         super().__init__(message)
         self.batches = batches
@@ -1267,6 +1268,9 @@ class PartialUploadError(RuntimeError):
         self.resume_from_line = resume_from_line
         self.dry_run = dry_run
         self.row_errors = row_errors or []
+        # A transport failure is not a rejection: the batch may have reached
+        # Google, so the caller must not simply send it again.
+        self.unknown_status = unknown_status
 
 
 def _row_errors_from_failure(
@@ -1334,16 +1338,39 @@ def _upload_in_batches(
                 if failure is not None
                 else []
             )
+            from google.ads.googleads.errors import GoogleAdsException
+
+            from adloop.ads.validate_only import ValidateOnlyFailure
+
+            # A rejection is a decision; anything else (deadline, dropped
+            # connection) leaves the batch's fate unknown — it may have been
+            # received before the failure surfaced.
+            rejected = isinstance(exc, (GoogleAdsException, ValidateOnlyFailure))
+            unknown = not rejected
+            # GoogleAdsException has no useful __str__; reuse the Ads parser.
+            from adloop.ads.write import _extract_error_message
+
+            detail = _extract_error_message(exc)
+
             if dry_run:
                 message = (
                     f"Validation failed in batch {index + 1} of {batch_total} "
-                    f"(CSV lines {first_line}-{last_line}): {exc} Nothing was "
-                    "uploaded — a dry run only validates."
+                    f"(CSV lines {first_line}-{last_line}): {detail} Nothing "
+                    "was uploaded — a dry run only validates."
+                )
+            elif unknown:
+                message = (
+                    f"Batch {index + 1} of {batch_total} (CSV lines "
+                    f"{first_line}-{last_line}) failed with an unknown outcome: "
+                    f"{detail} The request may have been received before the "
+                    f"failure surfaced, so treat these rows as uploaded until "
+                    f"you have checked the conversion action — {done} row(s) "
+                    "from earlier batches are definitely in."
                 )
             else:
                 message = (
                     f"Upload failed in batch {index + 1} of {batch_total} "
-                    f"(CSV lines {first_line}-{last_line}): {exc} {done} row(s) "
+                    f"(CSV lines {first_line}-{last_line}): {detail} {done} row(s) "
                     f"from {len(ledger)} batch(es) are already uploaded and "
                     "must not be sent again — resume the CSV at line "
                     f"{first_line}."
@@ -1355,6 +1382,7 @@ def _upload_in_batches(
                 resume_from_line=first_line,
                 dry_run=dry_run,
                 row_errors=row_errors + batch_row_errors,
+                unknown_status=unknown and not dry_run,
             ) from exc
 
         results = list(response.results)

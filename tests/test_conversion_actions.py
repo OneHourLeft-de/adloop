@@ -769,13 +769,18 @@ class TestConsentParam:
 
 class _FakeUploadService:
     def __init__(
-        self, results_count: int = 0, error_message: str = "", fail_on_call: int = 0
+        self,
+        results_count: int = 0,
+        error_message: str = "",
+        fail_on_call: int = 0,
+        fail_exception: Exception | None = None,
     ):
         self.called_with: dict | None = None
         self.calls: list[dict] = []
         self._results_count = results_count
         self._error_message = error_message
         self._fail_on_call = fail_on_call
+        self._fail_exception = fail_exception
         # Optional real proto, set by tests that need per-index detail.
         self.partial_failure = None
 
@@ -798,7 +803,7 @@ class _FakeUploadService:
         }
         self.calls.append(dict(self.called_with))
         if self._fail_on_call and len(self.calls) == self._fail_on_call:
-            raise RuntimeError("batch rejected by Google")
+            raise self._fail_exception or RuntimeError("batch rejected by Google")
         # Mark the first N results as accepted (conversion_action populated).
         results = []
         for i, c in enumerate(conversions):
@@ -845,7 +850,7 @@ class _FakeClickUploadService:
         }
         self.calls.append(dict(self.called_with))
         if self._fail_on_call and len(self.calls) == self._fail_on_call:
-            raise RuntimeError("batch rejected by Google")
+            raise self._fail_exception or RuntimeError("batch rejected by Google")
         results = []
         for i, c in enumerate(conversions):
             results.append(SimpleNamespace(
@@ -1902,7 +1907,11 @@ class TestUploadBatching:
     def test_a_failed_batch_reports_what_is_already_uploaded(self):
         # Batch 1 goes through, batch 2 does not. A blind retry would
         # double-count the first 2,000 calls — there is no dedup key for them.
-        upload = _FakeUploadService(results_count=10_000, fail_on_call=2)
+        upload = _FakeUploadService(
+            results_count=10_000,
+            fail_on_call=2,
+            fail_exception=_google_rejection("Invalid conversion action"),
+        )
         client = _client_with(upload_service=upload, ads_service=self._ads())
 
         with pytest.raises(RuntimeError) as excinfo:
@@ -2976,6 +2985,17 @@ class TestValueAndCurrencyAreOptional:
         assert "3-letter ISO code" in " ".join(bad["details"])
 
 
+def _google_rejection(message: str):
+    """A GoogleAdsException as Google raises it for a rejected request."""
+    from google.ads.googleads.errors import GoogleAdsException
+    from google.ads.googleads.v25.errors.types import errors as err_types
+
+    failure = err_types.GoogleAdsFailure(
+        errors=[err_types.GoogleAdsError(message=message)]
+    )
+    return GoogleAdsException(None, None, failure, "req-1")
+
+
 def _partial_failure_with_index(client, index: int, message: str):
     """A partial_failure_error naming conversions[index], as Google sends it."""
     from google.protobuf.any_pb2 import Any as AnyProto
@@ -3068,3 +3088,105 @@ class TestPerLineErrors:
         assert result["row_errors"] == [
             {"batch": 1, "line": 3, "error": "Conversion action is invalid"}
         ]
+
+
+class TestThePlanIsClaimedBeforeUploading:
+    """One plan, one upload — even if the client times out and confirms again."""
+
+    def _config(self, tmp_path):
+        return AdLoopConfig(
+            ads=AdsConfig(customer_id="123-456-7890"),
+            safety=SafetyConfig(
+                require_dry_run=False, log_file=str(tmp_path / "audit.log")
+            ),
+        )
+
+    def _plan(self, config, tmp_path, monkeypatch, *, rows=1, upload=None):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CALLS")
+        path = tmp_path / "phone.csv"
+        path.write_text(
+            _CALL_HEADER
+            + "".join(
+                f"+1415555{i:04d},2026-03-01T12:00:00Z,My Action,"
+                f"2026-03-01T13:00:00Z,10,USD\n"
+                for i in range(rows)
+            )
+        )
+        preview = conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+        upload = upload or _FakeUploadService(results_count=10_000)
+        client = _client_with(
+            upload_service=upload, ads_service=_EchoActionRows("UPLOAD_CALLS")
+        )
+        monkeypatch.setattr("adloop.ads.client.get_ads_client", lambda _cfg: client)
+        return preview, upload
+
+    def test_a_successful_apply_leaves_no_pending_plan(self, tmp_path, monkeypatch):
+        config = self._config(tmp_path)
+        preview, _upload = self._plan(config, tmp_path, monkeypatch)
+
+        result = write.confirm_and_apply(
+            config, plan_id=preview["plan_id"], dry_run=False
+        )
+
+        assert result["status"] == "APPLIED"
+        assert preview_store.get_plan(preview["plan_id"]) is None
+
+    def test_a_second_confirm_while_the_first_is_running_finds_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        """Once the plan is claimed, a second confirm cannot start an upload."""
+        config = self._config(tmp_path)
+        preview, upload = self._plan(config, tmp_path, monkeypatch)
+        # Simulate the first apply having claimed the plan already.
+        assert preview_store.claim_plan(preview["plan_id"]) is not None
+
+        result = write.confirm_and_apply(
+            config, plan_id=preview["plan_id"], dry_run=False
+        )
+
+        assert "No pending plan found" in result["error"]
+        assert upload.calls == []
+
+    def test_a_failure_before_the_first_request_gives_the_plan_back(
+        self, tmp_path, monkeypatch
+    ):
+        config = self._config(tmp_path)
+        preview, _upload = self._plan(config, tmp_path, monkeypatch)
+        plan = preview_store.get_plan(preview["plan_id"])
+        # No payload: the applier refuses before it builds a request.
+        plan.apply_only_payload = {}
+        preview_store.store_plan(plan)
+
+        result = write.confirm_and_apply(
+            config, plan_id=preview["plan_id"], dry_run=False
+        )
+
+        assert "apply_only_payload" in result["error"]
+        assert preview_store.get_plan(preview["plan_id"]) is not None
+
+    def test_a_transport_failure_reports_an_unknown_outcome(
+        self, tmp_path, monkeypatch
+    ):
+        """A dropped connection is not a rejection: the batch may have arrived."""
+        config = self._config(tmp_path)
+        upload = _FakeUploadService(
+            results_count=10_000,
+            fail_on_call=2,
+            fail_exception=RuntimeError("DEADLINE_EXCEEDED"),
+        )
+        preview, _upload = self._plan(
+            config, tmp_path, monkeypatch, rows=2501, upload=upload
+        )
+
+        result = write.confirm_and_apply(
+            config, plan_id=preview["plan_id"], dry_run=False
+        )
+
+        assert result["status"] == "PARTIAL_UPLOAD", result
+        assert result["unknown_status"] is True
+        assert "unknown outcome" in result["error"]
+        assert "may have been received" in result["error"]
+        # The plan is retired either way: those rows cannot be sent again safely.
+        assert preview_store.get_plan(preview["plan_id"]) is None

@@ -2608,7 +2608,7 @@ def confirm_and_apply(
     to make real changes.
     """
     from adloop.safety.audit import log_mutation
-    from adloop.safety.preview import get_plan, remove_plan, store_plan
+    from adloop.safety.preview import claim_plan, get_plan, remove_plan, store_plan
 
     plan = get_plan(plan_id)
     if plan is None:
@@ -2782,6 +2782,23 @@ def confirm_and_apply(
             ),
         }
 
+    # Claim the plan in one step so a second confirm while this one is still
+    # running finds nothing to execute — the client may have timed out while the
+    # first apply is happily uploading.
+    claimed = claim_plan(plan.plan_id)
+    if claimed is None:
+        return {
+            "status": "APPLY_IN_PROGRESS",
+            "plan_id": plan.plan_id,
+            "operation": plan.operation,
+            "error": (
+                f"Plan '{plan.plan_id}' is no longer pending: it is being "
+                "applied right now or has already been applied. Confirm again "
+                "only after checking the conversion action for what arrived."
+            ),
+        }
+    plan = claimed
+
     try:
         result = _execute_plan(config, plan)
     except Exception as e:
@@ -2792,6 +2809,14 @@ def confirm_and_apply(
         # the obvious reflex after an error — would resend those rows, and call
         # conversions have no dedup key to absorb the duplicates.
         from adloop.ads.conversion_actions import PartialUploadError
+
+        upload_happened = isinstance(e, PartialUploadError) and (
+            e.uploaded_total or e.unknown_status
+        )
+        if not upload_happened:
+            # Nothing was sent (or the request never left): the plan is still
+            # the caller's to fix and retry.
+            store_plan(plan)
 
         if isinstance(e, PartialUploadError) and e.uploaded_total:
             log_mutation(
@@ -2814,6 +2839,7 @@ def confirm_and_apply(
                 "uploaded_total": e.uploaded_total,
                 "batches": e.batches,
                 "resume_from_line": e.resume_from_line,
+                "unknown_status": e.unknown_status,
                 **({"row_errors": e.row_errors} if e.row_errors else {}),
                 "message": (
                     f"{e.uploaded_total} row(s) are uploaded; the plan is no "

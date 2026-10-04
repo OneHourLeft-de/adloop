@@ -86,6 +86,17 @@ class PlanStore(Protocol):
 
     def remove(self, tenant: str, plan_id: str) -> None: ...
 
+    def claim(self, tenant: str, plan_id: str) -> ChangePlan | None:
+        """Take the plan out of the store in one atomic step.
+
+        An apply that is already running must not be started a second time: the
+        client times out, the model confirms again, and the upload goes out
+        twice. Claiming before the first request makes the second call find
+        nothing; a failure that provably happened before anything was sent can
+        put the plan back.
+        """
+        ...
+
 
 class InMemoryPlanStore:
     """Default store: plans live in process memory and expire on restart."""
@@ -105,6 +116,10 @@ class InMemoryPlanStore:
     def remove(self, tenant: str, plan_id: str) -> None:
         with self._lock:
             self._plans.pop((tenant, plan_id), None)
+
+    def claim(self, tenant: str, plan_id: str) -> ChangePlan | None:
+        with self._lock:
+            return self._plans.pop((tenant, plan_id), None)
 
 
 _active_store: PlanStore = InMemoryPlanStore()
@@ -139,3 +154,10 @@ def remove_plan(plan_id: str) -> None:
     from adloop.runtime import current_tenant
 
     _active_store.remove(current_tenant(), plan_id)
+
+
+def claim_plan(plan_id: str) -> ChangePlan | None:
+    """Atomically take a plan out of the store (see ``PlanStore.claim``)."""
+    from adloop.runtime import current_tenant
+
+    return _active_store.claim(current_tenant(), plan_id)
