@@ -37,7 +37,12 @@ class ValidateOnlyClient:
     Everything except ``get_service`` passes through (enums, ``get_type``),
     and every service method except ``mutate*`` passes through too, so the
     reads some apply paths do before mutating still run normally.
+
+    ``is_validate_only`` marks this client for appliers that phrase their
+    errors differently when nothing can have been written.
     """
+
+    is_validate_only = True
 
     def __init__(self, client: object) -> None:
         self._client = client

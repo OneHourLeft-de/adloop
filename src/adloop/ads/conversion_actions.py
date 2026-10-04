@@ -22,6 +22,7 @@ MUTATE_NOT_ALLOWED):
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import TYPE_CHECKING
 
 from adloop.ads.enums import enum_names
@@ -594,18 +595,33 @@ def _sha256_hex(value: str) -> str:
 
 
 def _normalize_email(email: str) -> str:
-    """Normalize an email for Enhanced Conversions: trim + lowercase.
+    """Normalize an email the way Enhanced Conversions expect it hashed.
 
-    Google's canonicalization for EC is trim + lowercase. (Gmail dot/plus
-    stripping is NOT applied by Google's EC matcher — it matches on the
-    literal normalized address — so we deliberately do NOT strip dots or
-    +tags. Doing so would REDUCE the match rate.)
+    Google's rules (Enhanced conversions → upload identifiers):
+
+    * lowercase and remove whitespace everywhere;
+    * for ``gmail.com`` / ``googlemail.com`` only: remove periods from the
+      username, then drop the ``+…`` suffix — skipping this produces a hash
+      Google does not expect for those domains, which silently loses matches;
+    * every other domain keeps dots and plus tags.
     """
-    return (email or "").strip().lower()
+    value = re.sub(r"\s+", "", (email or "").lower())
+    if "@" not in value:
+        return value
+    local, _, domain = value.rpartition("@")
+    if domain in ("gmail.com", "googlemail.com"):
+        local = local.split("+", 1)[0].replace(".", "")
+    return f"{local}@{domain}"
 
 
 def _normalize_name(name: str) -> str:
-    """Normalize a first/last name for EC: trim + lowercase."""
+    """Normalize a first/last name for EC: trim, then lowercase.
+
+    Google's own example (``upload_enhanced_conversions_for_leads.py``) does
+    exactly ``s.strip().lower()`` for names — inner spaces stay, which matters
+    for "Anna Lena" or "von der Berg". Removing them produces a hash Google
+    does not expect, so the row would never match.
+    """
     return (name or "").strip().lower()
 
 
@@ -749,8 +765,14 @@ _CSV_SKIP_PREFIXES = ("Parameters:", "#")
 _MAX_CSV_BYTES = 5 * 1024 * 1024
 
 
-def _read_upload_csv(csv_path: str) -> tuple[list[list[str]], list[str]]:
-    """Read an upload CSV into rows (header first); returns ``(rows, errors)``.
+def _read_upload_csv(csv_path: str) -> tuple[list[tuple[int, list[str]]], list[str]]:
+    """Read an upload CSV into ``(source_line, cells)`` records (header first).
+
+    ``source_line`` is the physical line in the file where the record ends —
+    the only row number that means anything to the person editing the CSV, and
+    therefore the only one used in errors, ``skipped_rows`` and the resume hint.
+    Counting records instead would drift as soon as a comment or a bad row is
+    dropped.
 
     Local-only by design: the path is read from the machine running AdLoop, so
     the tool refuses in server mode before it gets here. Errors name the file
@@ -778,23 +800,40 @@ def _read_upload_csv(csv_path: str) -> tuple[list[list[str]], list[str]]:
 
     try:
         with path.open("r", newline="", encoding="utf-8-sig") as handle:
-            rows = [
-                row
-                for row in csv.reader(handle)
-                if row
-                # Only fully blank rows are blank: a row whose *first* cell is
-                # empty (e.g. a lead without an email) is real data.
-                and any((cell or "").strip() for cell in row)
-                and not (row[0] or "").strip().startswith(_CSV_SKIP_PREFIXES)
-            ]
+            position = {"line": 0}
+
+            def _lines():
+                for line in handle:
+                    position["line"] += 1
+                    yield line
+
+            records: list[tuple[int, list[str]]] = []
+            reader = csv.reader(_lines())
+            while True:
+                # The line where this record starts: a quoted field may span
+                # several lines, and a resume hint has to point at the record,
+                # not into the middle of it.
+                start_line = position["line"] + 1
+                try:
+                    record = next(reader)
+                except StopIteration:
+                    break
+                if not record:
+                    continue
+                # A blank record: every cell empty.
+                if not any((cell or "").strip() for cell in record):
+                    continue
+                if (record[0] or "").strip().startswith(_CSV_SKIP_PREFIXES):
+                    continue
+                records.append((start_line, record))
     except OSError as exc:
         return [], [f"CSV could not be read: {exc.strerror or exc}"]
     except UnicodeDecodeError:
         return [], ["CSV is not valid UTF-8."]
 
-    if not rows:
+    if not records:
         return [], ["CSV is empty (no header row found)"]
-    return rows, []
+    return records, []
 
 
 def _column_map(
@@ -826,23 +865,25 @@ def _parse_call_conversion_csv(csv_path: str) -> tuple[list[dict], list[str]]:
     call-to-click matching and it cannot be hashed. The draft stores it in
     ``ChangePlan.apply_only_payload``, which no preview or audit surface shows.
     """
-    rows, errors = _read_upload_csv(csv_path)
+    records, errors = _read_upload_csv(csv_path)
     if errors:
         return [], errors
 
-    col, errors = _column_map(rows[0], _EXPECTED_CALL_HEADERS)
+    _, header = records[0]
+    col, errors = _column_map(header, _EXPECTED_CALL_HEADERS)
     if errors:
         return [], errors
 
     out: list[dict] = []
-    for row_num, raw in enumerate(rows[1:], start=1):
+    for source_line, raw in records[1:]:
         try:
             value_str = raw[col["Conversion Value"]].strip()
             value = float(value_str) if value_str else 0.0
         except (ValueError, IndexError):
-            errors.append(f"Row {row_num}: invalid Conversion Value")
+            errors.append(f"Row {source_line}: invalid Conversion Value")
             continue
         out.append({
+            "source_line": source_line,
             "caller_id": _normalize_phone_e164(raw[col["Caller's Phone Number"]]),
             "call_start_time": _normalize_call_timestamp(raw[col["Call Start Time"]]),
             "conversion_name": raw[col["Conversion Name"]].strip(),
@@ -934,13 +975,13 @@ def draft_upload_call_conversions(
     # Google fails such a row. Report it here instead of uploading a no-op.
     usable: list[dict] = []
     skipped: list[dict] = []
-    for row_num, row in enumerate(rows, start=1):
+    for row in rows:
         caller = (row.get("caller_id") or "").strip()
         if caller.startswith("+"):
             usable.append(row)
             continue
         skipped.append({
-            "row": row_num,
+            "row": row.get("source_line"),
             "reason": (
                 "caller_id is empty"
                 if not caller
@@ -979,6 +1020,7 @@ def draft_upload_call_conversions(
     # audit surface shows; the audit log gets the summary below.
     frozen_rows = [
         {
+            "source_line": r.get("source_line"),
             "caller_id": r["caller_id"],
             "call_start_time": r["call_start_time"],
             "conversion_name": r["conversion_name"],
@@ -1090,17 +1132,48 @@ def _resolve_upload_action(
 _MAX_ROWS_PER_REQUEST = 2000
 
 
-def _upload_in_batches(rows: list[dict], send) -> dict:
+class PartialUploadError(RuntimeError):
+    """An upload stopped after some batches had already gone through.
+
+    Carrying the ledger as data (not only inside the message) is what lets
+    ``confirm_and_apply`` retire the plan: a second confirm after a partial
+    failure would upload the finished batches again, and call conversions have
+    no dedup key to absorb that.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        batches: list[dict],
+        uploaded_total: int,
+        resume_from_line: object,
+        dry_run: bool,
+    ) -> None:
+        super().__init__(message)
+        self.batches = batches
+        self.uploaded_total = uploaded_total
+        self.resume_from_line = resume_from_line
+        self.dry_run = dry_run
+
+
+def _source_line(row: dict, fallback: int) -> object:
+    """The CSV line a row came from, or a positional fallback for hand-built plans."""
+    return row.get("source_line") or fallback
+
+
+def _upload_in_batches(rows: list[dict], send, *, dry_run: bool = False) -> dict:
     """Send ``rows`` in API-sized batches and report progress per batch.
 
     ``send(chunk)`` builds the protos for one chunk, calls the upload service
     and returns ``(payload, response)``.
 
-    A failure in batch 3 leaves batches 1-2 uploaded, so the error has to say
-    which rows are already in: call uploads have no dedup key at all, and click
-    uploads only dedupe on an order id, so a blind retry double-counts whatever
-    went through. The error names the first row of the failed batch as the
-    resume point.
+    Row numbers are the physical CSV lines the rows came from, so a message
+    means the same thing to whoever edits the file. A failure in batch 3 leaves
+    batches 1-2 uploaded, so the error says which lines are already in: calls
+    have no dedup key at all, and click uploads only dedupe on an order id, so
+    a blind retry double-counts whatever went through. In a dry run nothing was
+    uploaded and the error says so instead.
     """
     total = len(rows)
     batch_total = (total + _MAX_ROWS_PER_REQUEST - 1) // _MAX_ROWS_PER_REQUEST
@@ -1111,16 +1184,32 @@ def _upload_in_batches(rows: list[dict], send) -> dict:
     for index in range(batch_total):
         start = index * _MAX_ROWS_PER_REQUEST
         chunk = rows[start:start + _MAX_ROWS_PER_REQUEST]
+        first_line = _source_line(chunk[0], start + 1)
+        last_line = _source_line(chunk[-1], start + len(chunk))
         try:
             payload, response = send(chunk)
         except Exception as exc:  # noqa: BLE001 — re-raised with the ledger
             done = sum(batch["uploaded"] for batch in ledger)
-            raise RuntimeError(
-                f"Upload failed in batch {index + 1} of {batch_total} "
-                f"(rows {start + 1}-{start + len(chunk)} of {total}): {exc} "
-                f"{done} row(s) from {len(ledger)} batch(es) are already "
-                "uploaded and must not be sent again — resume the CSV at row "
-                f"{start + 1}."
+            if dry_run:
+                message = (
+                    f"Validation failed in batch {index + 1} of {batch_total} "
+                    f"(CSV lines {first_line}-{last_line}): {exc} Nothing was "
+                    "uploaded — a dry run only validates."
+                )
+            else:
+                message = (
+                    f"Upload failed in batch {index + 1} of {batch_total} "
+                    f"(CSV lines {first_line}-{last_line}): {exc} {done} row(s) "
+                    f"from {len(ledger)} batch(es) are already uploaded and "
+                    "must not be sent again — resume the CSV at line "
+                    f"{first_line}."
+                )
+            raise PartialUploadError(
+                message,
+                batches=ledger,
+                uploaded_total=done,
+                resume_from_line=first_line,
+                dry_run=dry_run,
             ) from exc
 
         results = list(response.results)
@@ -1131,8 +1220,8 @@ def _upload_in_batches(rows: list[dict], send) -> dict:
         success_total += success
         ledger.append({
             "batch": index + 1,
-            "first_row": start + 1,
-            "last_row": start + len(chunk),
+            "first_source_line": first_line,
+            "last_source_line": last_line,
             "uploaded": len(payload),
             "success_count": success,
             "failure_count": len(results) - success,
@@ -1180,12 +1269,7 @@ def _apply_upload_call_conversions(
             )
         return {"error": "Plan contained zero call-conversion rows"}
 
-    action_resources = changes.get("conversion_actions") or {}
-    if not action_resources:
-        raise RuntimeError(
-            "This plan carries no resolved conversion actions; it was created "
-            "before the draft validated them. Draft the upload again."
-        )
+    action_resources = changes["conversion_actions"]
     consent = changes.get("consent")
     upload_service = client.get_service("ConversionUploadService")
 
@@ -1210,7 +1294,9 @@ def _apply_upload_call_conversions(
         )
         return payload, response
 
-    ledger = _upload_in_batches(rows, _send)
+    ledger = _upload_in_batches(
+        rows, _send, dry_run=bool(getattr(client, "is_validate_only", False))
+    )
     ledger["conversion_actions_used"] = action_resources
     return ledger
 
@@ -1240,9 +1326,9 @@ _EXPECTED_EC_HEADERS = [
 # double-count.
 _OPTIONAL_EC_HEADERS = [
     "Order ID",
-    # Enhanced Conversions for Leads matches name-only rows far better with an
-    # address than without: Google expects at least country + postal code next
-    # to hashed names. Both are plain values (the proto hashes only the names).
+    # Google's identifier list spells the address out: first name, last name,
+    # country code and postal code belong together. Country and postal travel
+    # as plain values (only the names are hashed).
     "Postal Code",
     "Country Code",
 ]
@@ -1262,23 +1348,24 @@ def _parse_ec_for_leads_csv(csv_path: str) -> tuple[list[dict], list[str]]:
     hashes (``*_sha256`` keys) plus non-PII fields — the raw values never
     leave this function.
     """
-    rows, errors = _read_upload_csv(csv_path)
+    records, errors = _read_upload_csv(csv_path)
     if errors:
         return [], errors
 
-    col, errors = _column_map(rows[0], _EXPECTED_EC_HEADERS)
+    _, raw_header = records[0]
+    col, errors = _column_map(raw_header, _EXPECTED_EC_HEADERS)
     if errors:
         return [], errors
-    header = [cell.strip() for cell in rows[0]]
+    header = [cell.strip() for cell in raw_header]
     optional_col = {n: header.index(n) for n in _OPTIONAL_EC_HEADERS if n in header}
 
     out: list[dict] = []
-    for row_num, raw in enumerate(rows[1:], start=1):
+    for source_line, raw in records[1:]:
         try:
             value_str = raw[col["Conversion Value"]].strip()
             value = float(value_str) if value_str else 0.0
         except (ValueError, IndexError):
-            errors.append(f"Row {row_num}: invalid Conversion Value")
+            errors.append(f"Row {source_line}: invalid Conversion Value")
             continue
         order_id = ""
         if "Order ID" in optional_col:
@@ -1300,15 +1387,30 @@ def _parse_ec_for_leads_csv(csv_path: str) -> tuple[list[dict], list[str]]:
         def _optional(name: str) -> str:
             return raw[optional_col[name]].strip() if name in optional_col else ""
 
+        country = _optional("Country Code").upper()
+        postal = _optional("Postal Code").strip()
+        if country and not re.fullmatch(r"[A-Z]{2}", country):
+            # "Germany" instead of "DE" must not cost the whole row: drop the
+            # address fragment, keep whatever else identifies the lead, and say
+            # what was dropped. Only a row left without any identifier is
+            # skipped, and that happens in the draft where it is reported as
+            # skipped_rows rather than as a parse warning.
+            errors.append(
+                f"Row {source_line}: Country Code must be a two-letter ISO "
+                f"code, got {country!r} — the address was dropped for this row"
+            )
+            country = ""
+            postal = ""
         out.append({
+            "source_line": source_line,
             "email_sha256": _sha256_hex(email_norm),
             "phone_sha256": _sha256_hex(phone_norm) if phone_usable else "",
             "phone_was_given": bool((raw_phone or "").strip()),
             "phone_usable": phone_usable,
             "first_name_sha256": _sha256_hex(first_norm),
             "last_name_sha256": _sha256_hex(last_norm),
-            "postal_code": _optional("Postal Code"),
-            "country_code": _optional("Country Code").upper(),
+            "postal_code": postal,
+            "country_code": country,
             "conversion_name": raw[col["Conversion Name"]].strip(),
             "conversion_time": _normalize_call_timestamp(
                 raw[col["Conversion Time"]]
@@ -1322,35 +1424,50 @@ def _parse_ec_for_leads_csv(csv_path: str) -> tuple[list[dict], list[str]]:
     return out, errors
 
 
+def _has_complete_address(row: dict) -> bool:
+    """The address identifier Google documents: names + country + postal code."""
+    return bool(
+        row["first_name_sha256"]
+        and row["last_name_sha256"]
+        and row["postal_code"]
+        and row["country_code"]
+    )
+
+
 def _match_warnings(
-    with_address: int,
+    names_without_address: list[int],
+    address_without_names: list[int],
     unusable_phones: list[int],
-    name_only: list[int],
 ) -> list[str]:
     """Warnings about identifiers that will not match, said up front.
 
-    Every one of these rows is still uploaded — dropping them silently is how
-    an upload reports 100% success and matches nothing.
+    Rows listed here are still uploaded — on whatever identifier they do have —
+    so the preview has to say what was left out instead of counting it as sent.
+    Each case is phrased for what the caller actually supplied: a lead export
+    with names and an email but no address columns has not sent a broken
+    address, it simply has none.
     """
     warnings: list[str] = []
+    if names_without_address:
+        warnings.append(
+            f"{len(names_without_address)} row(s) have first and last name but "
+            "no country code or postal code. Names are sent only together with "
+            "both — add a 'Country Code' and a 'Postal Code' column to use "
+            f"them; first affected rows: {names_without_address[:5]}."
+        )
+    if address_without_names:
+        warnings.append(
+            f"{len(address_without_names)} row(s) have a country code and/or a "
+            "postal code but no first and last name, so the address is not "
+            "sent — the address identifier needs all four fields; first "
+            f"affected rows: {address_without_names[:5]}."
+        )
     if unusable_phones:
         warnings.append(
             f"{len(unusable_phones)} row(s) carry a phone number that is not "
             "E.164 (no leading '+'), so the hashed value cannot match. Those "
             "rows are uploaded without the phone identifier; first affected "
             f"rows: {unusable_phones[:5]}."
-        )
-    if name_only:
-        warnings.append(
-            f"{len(name_only)} row(s) have only hashed names — Google usually "
-            "needs country and postal code next to them (and email or phone "
-            "match better still). Add a 'Country Code' and 'Postal Code' "
-            f"column; first affected rows: {name_only[:5]}."
-        )
-    if with_address == 0:
-        warnings.append(
-            "No row carries a country + postal code. Enhanced Conversions for "
-            "Leads matches far better with them, especially for name-based rows."
         )
     return warnings
 
@@ -1418,34 +1535,47 @@ def draft_upload_enhanced_conversions_for_leads(
     if not rows:
         return {"error": "CSV contained zero conversion rows"}
 
-    # A row with nothing Google can match on would be uploaded to no effect and
-    # counted as a success later. Report it instead of sending it.
+    # A row that cannot match would be uploaded to no effect and counted as a
+    # success later. Google's identifier list is explicit about what an address
+    # identifier is: first name, last name, country code and postal code, hashed
+    # names and plain address — a postcode alone identifies nobody. So a row is
+    # usable with an email, an E.164 phone, or that complete address.
     usable: list[dict] = []
     skipped: list[dict] = []
-    for row_num, row in enumerate(rows, start=1):
-        has_address = bool(row["postal_code"] and row["country_code"])
+    for row in rows:
         has_names = bool(row["first_name_sha256"] and row["last_name_sha256"])
-        # Names alone are weak but not useless — Google can match on them, so
-        # such a row is uploaded and warned about rather than dropped.
-        if row["email_sha256"] or row["phone_sha256"] or has_address or has_names:
+        has_address = bool(
+            has_names and row["postal_code"] and row["country_code"]
+        )
+        if row["email_sha256"] or row["phone_sha256"] or has_address:
             usable.append(row)
             continue
-        skipped.append({
-            "row": row_num,
-            "reason": (
-                "phone is not E.164 and the row has no other identifier"
-                if row["phone_was_given"]
-                else (
-                    "no usable identifier — the row has no email, no E.164 "
-                    "phone, no country+postal code and no first/last name"
-                )
-            ),
-        })
+
+        if has_names and (row["postal_code"] or row["country_code"]):
+            reason = (
+                "address is incomplete — first name, last name, country code "
+                "and postal code are needed together for an address identifier"
+            )
+        elif has_names:
+            reason = (
+                "only hashed names and no email/phone/address — an address "
+                "identifier needs country code and postal code as well"
+            )
+        elif row["phone_was_given"]:
+            reason = "phone is not E.164 and the row has no other identifier"
+        elif row["postal_code"] or row["country_code"]:
+            reason = (
+                "only part of an address (no names) — that cannot match"
+            )
+        else:
+            reason = "no usable identifier (no email, no E.164 phone, no address)"
+        skipped.append({"row": row.get("source_line"), "reason": reason})
     if not usable:
         return {
             "error": (
-                "No row carries a usable identifier (email, E.164 phone, or "
-                "country + postal code). Nothing was planned."
+                "No row carries a usable identifier (email, E.164 phone, or a "
+                "complete address of names + country + postal code). Nothing "
+                "was planned."
             ),
             "skipped_rows": skipped,
         }
@@ -1468,22 +1598,27 @@ def draft_upload_enhanced_conversions_for_leads(
     with_email = sum(1 for r in rows if r["email_sha256"])
     with_phone = sum(1 for r in rows if r["phone_sha256"])
     with_order_id = sum(1 for r in rows if r.get("order_id"))
+    # Counted with the same four-field condition the applier sends with: a
+    # half address never leaves the process, so it must not show up as one.
     with_address = sum(
-        1 for r in rows if r["postal_code"] and r["country_code"]
+        1 for r in rows if _has_complete_address(r)
     )
     unusable_phones = [
-        row_num
-        for row_num, r in enumerate(rows, start=1)
+        _source_line(r, index)
+        for index, r in enumerate(rows, start=1)
         if r["phone_was_given"] and not r["phone_usable"]
     ]
-    name_only = [
-        row_num
-        for row_num, r in enumerate(rows, start=1)
-        if not r["email_sha256"]
-        and not r["phone_sha256"]
-        and r["first_name_sha256"]
-        and r["last_name_sha256"]
-        and not (r["postal_code"] and r["country_code"])
+    names_without_address = [
+        _source_line(r, index)
+        for index, r in enumerate(rows, start=1)
+        if (r["first_name_sha256"] or r["last_name_sha256"])
+        and not _has_complete_address(r)
+    ]
+    address_without_names = [
+        _source_line(r, index)
+        for index, r in enumerate(rows, start=1)
+        if (r["postal_code"] or r["country_code"])
+        and not (r["first_name_sha256"] and r["last_name_sha256"])
     ]
 
     dedup_warnings: list[str] = []
@@ -1505,6 +1640,7 @@ def draft_upload_enhanced_conversions_for_leads(
     # currency/time/action only) surface in the audit log.
     frozen_rows = [
         {
+            "source_line": r.get("source_line"),
             "email_sha256": r["email_sha256"],
             "phone_sha256": r["phone_sha256"],
             "first_name_sha256": r["first_name_sha256"],
@@ -1545,7 +1681,7 @@ def draft_upload_enhanced_conversions_for_leads(
             "parse_warnings": parse_errors,
             "dedup_warnings": dedup_warnings,
             "match_warnings": _match_warnings(
-                with_address, unusable_phones, name_only
+                names_without_address, address_without_names, unusable_phones
             ),
             "sample_rows": [
                 {
@@ -1589,12 +1725,7 @@ def _apply_upload_enhanced_conversions_for_leads(
             )
         return {"error": "Plan contained zero EC-for-leads rows"}
 
-    action_resources = changes.get("conversion_actions") or {}
-    if not action_resources:
-        raise RuntimeError(
-            "This plan carries no resolved conversion actions; it was created "
-            "before the draft validated them. Draft the upload again."
-        )
+    action_resources = changes["conversion_actions"]
     consent = changes.get("consent")
     upload_service = client.get_service("ConversionUploadService")
 
@@ -1621,20 +1752,17 @@ def _apply_upload_enhanced_conversions_for_leads(
                 uid = client.get_type("UserIdentifier")
                 uid.hashed_phone_number = r["phone_sha256"]
                 cc.user_identifiers.append(uid)
-            # Address info: Google hashes only the names; country and postal
-            # code go in as plain values. A country+postal pair is a usable
-            # identifier on its own, which is why name-only rows are worth
-            # completing rather than dropping.
-            has_address = bool(r.get("postal_code") and r.get("country_code"))
-            if (r["first_name_sha256"] and r["last_name_sha256"]) or has_address:
+            # Address info only as the complete unit Google documents: first
+            # name, last name, country code and postal code together. A row that
+            # matched on its email must not carry a half address along — Google
+            # would ignore it at best, and could fail the whole conversion at
+            # worst.
+            if _has_complete_address(r):
                 uid = client.get_type("UserIdentifier")
-                if r["first_name_sha256"] and r["last_name_sha256"]:
-                    uid.address_info.hashed_first_name = r["first_name_sha256"]
-                    uid.address_info.hashed_last_name = r["last_name_sha256"]
-                if r.get("postal_code"):
-                    uid.address_info.postal_code = r["postal_code"]
-                if r.get("country_code"):
-                    uid.address_info.country_code = r["country_code"]
+                uid.address_info.hashed_first_name = r["first_name_sha256"]
+                uid.address_info.hashed_last_name = r["last_name_sha256"]
+                uid.address_info.postal_code = r["postal_code"]
+                uid.address_info.country_code = r["country_code"]
                 cc.user_identifiers.append(uid)
             payload.append(cc)
         response = upload_service.upload_click_conversions(
@@ -1644,6 +1772,8 @@ def _apply_upload_enhanced_conversions_for_leads(
         )
         return payload, response
 
-    ledger = _upload_in_batches(rows, _send)
+    ledger = _upload_in_batches(
+        rows, _send, dry_run=bool(getattr(client, "is_validate_only", False))
+    )
     ledger["conversion_actions_used"] = action_resources
     return ledger

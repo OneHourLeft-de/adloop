@@ -2778,6 +2778,42 @@ def confirm_and_apply(
         result = _execute_plan(config, plan)
     except Exception as e:
         error_message = _extract_error_message(e)
+
+        # An upload that stopped mid-way has already changed the account for
+        # the batches that went through. Retire the plan: confirming it again —
+        # the obvious reflex after an error — would resend those rows, and call
+        # conversions have no dedup key to absorb the duplicates.
+        from adloop.ads.conversion_actions import PartialUploadError
+
+        if isinstance(e, PartialUploadError) and e.uploaded_total:
+            log_mutation(
+                config.safety.log_file,
+                operation=plan.operation,
+                customer_id=plan.customer_id,
+                entity_type=plan.entity_type,
+                entity_id=plan.entity_id,
+                changes=plan.changes,
+                dry_run=False,
+                result="partial_upload",
+                error=error_message,
+            )
+            remove_plan(plan.plan_id)
+            return {
+                "status": "PARTIAL_UPLOAD",
+                "plan_id": plan.plan_id,
+                "operation": plan.operation,
+                "error": error_message,
+                "uploaded_total": e.uploaded_total,
+                "batches": e.batches,
+                "resume_from_line": e.resume_from_line,
+                "message": (
+                    f"{e.uploaded_total} row(s) are uploaded; the plan is no "
+                    "longer pending, so confirming it again cannot resend them. "
+                    f"Resume the CSV at line {e.resume_from_line} and draft the "
+                    "rest as a new upload."
+                ),
+            }
+
         log_mutation(
             config.safety.log_file,
             operation=plan.operation,

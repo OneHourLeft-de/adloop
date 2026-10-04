@@ -945,12 +945,10 @@ class _EchoActionRows:
 
     def search(self, *, customer_id, query):
         self.queries.append(query)
-        # Skip SQL literals such as the status filter, they are not names.
-        names = [
-            m.replace("''", "'")
-            for m in re.findall(r"'((?:[^']|'')*)'", query)
-            if m not in ("REMOVED", "ENABLED", "UPLOAD_CALLS", "UPLOAD_CLICKS")
-        ]
+        # Only the IN (...) list holds names; the rest of the query is schema.
+        match = re.search(r"IN \((.*?)\)", query, re.S)
+        literal = match.group(1) if match else ""
+        names = [m.replace("''", "'") for m in re.findall(r"'((?:[^']|'')*)'", literal)]
         return iter([
             _FakeSearchRow(
                 name, f"customers/1/conversionActions/{index}", type_name=self.type_name
@@ -1405,6 +1403,8 @@ class TestApplyUploadEcForLeads:
                 "phone_sha256": _PHONE_HASH,
                 "first_name_sha256": _FIRST_HASH,
                 "last_name_sha256": _LAST_HASH,
+                "postal_code": "",
+                "country_code": "",
                 "conversion_name": "My Job",
                 "conversion_time": "2026-03-01 12:00:00+00:00",
                 "conversion_value": 500.0,
@@ -1416,6 +1416,8 @@ class TestApplyUploadEcForLeads:
                 "phone_sha256": _PHONE_HASH,
                 "first_name_sha256": "",
                 "last_name_sha256": "",
+                "postal_code": "",
+                "country_code": "",
                 "conversion_name": "My Job",
                 "conversion_time": "2026-03-02 12:00:00+00:00",
                 "conversion_value": 1500.0,
@@ -1452,16 +1454,52 @@ class TestApplyUploadEcForLeads:
         assert result["uploaded_total"] == 2
         assert result["success_count"] == 2
         sent = upload.called_with["conversions"]
-        # Row 1: email + phone + name = 3 identifiers.
-        assert len(sent[0].user_identifiers) == 3
+        # Row 1: email + phone. The row also holds hashed names, but names
+        # without country and postal code are not an address identifier, so no
+        # half fragment is attached.
+        assert len(sent[0].user_identifiers) == 2
         assert sent[0].user_identifiers[0].hashed_email == _EMAIL_HASH
         assert sent[0].user_identifiers[1].hashed_phone_number == _PHONE_HASH
-        assert (
-            sent[0].user_identifiers[2].address_info.hashed_first_name
-            == _FIRST_HASH
+        assert not any(
+            uid.address_info.hashed_first_name for uid in sent[0].user_identifiers
         )
         # Row 2: phone only = 1 identifier.
         assert len(sent[1].user_identifiers) == 1
+
+    def test_the_address_is_sent_only_as_the_complete_unit(self, tmp_path):
+        """Names + country + postal together; anything less is left out."""
+        client, upload = self._client(results_count=1)
+        rows = [{
+            "email_sha256": _EMAIL_HASH,
+            "phone_sha256": "",
+            "first_name_sha256": _FIRST_HASH,
+            "last_name_sha256": _LAST_HASH,
+            "postal_code": "85521",
+            "country_code": "DE",
+            "conversion_name": "My Job",
+            "conversion_time": "2026-03-01 12:00:00+00:00",
+            "conversion_value": 10.0,
+            "currency_code": "EUR",
+            "order_id": "o-1",
+        }]
+
+        conversion_actions._apply_upload_enhanced_conversions_for_leads(
+            client,
+            "1",
+            {
+                "row_count": 1,
+                "rows": rows,
+                "conversion_actions": {"My Job": "customers/1/conversionActions/778"},
+            },
+        )
+
+        sent = upload.called_with["conversions"][0]
+        assert len(sent.user_identifiers) == 2      # email + complete address
+        address = sent.user_identifiers[1].address_info
+        assert address.hashed_first_name == _FIRST_HASH
+        assert address.hashed_last_name == _LAST_HASH
+        assert address.postal_code == "85521"
+        assert address.country_code == "DE"
 
     def test_success_count_keys_off_conversion_action(self, tmp_path):
         # user_identifiers are echoed back on ALL rows; only 1 matched.
@@ -1618,15 +1656,8 @@ class TestPiiNeverReachesAPreviewSurface:
                 log_file=str(log_path),
             ),
         )
-        preview_store.store_plan(self._upload_plan([self._row()]))
-
-        plan_id = [p for p in [None]]
-        from adloop.safety.preview import get_plan_store
-        store = get_plan_store()
-        # Retrieve the id through the store's own get() path
-        plan = preview_store.get_plan(
-            next(iter(store._plans.values())).plan_id  # noqa: SLF001 — in-memory store
-        )
+        plan = self._upload_plan([self._row()])
+        preview_store.store_plan(plan)
 
         prev_sink = audit.get_audit_sink()
         audit.set_audit_sink(audit.FileAuditSink())
@@ -1638,8 +1669,9 @@ class TestPiiNeverReachesAPreviewSurface:
         assert resp["status"] == "DRY_RUN_REQUIRED"
         logged = log_path.read_text()
         assert '"result": "refused_two_phase"' in logged
+        # The logged plan is the summary: no rows, no caller id.
         assert "+15555550142" not in logged
-        assert "rows" not in logged
+        assert '"row_count": 1' in logged
 
 
 # ---------------------------------------------------------------------------
@@ -1737,7 +1769,7 @@ class TestCsvInputHardening:
     def test_server_mode_refuses_before_touching_the_filesystem(
         self, config, tmp_path, monkeypatch
     ):
-        from adloop.runtime import deployment_mode, set_deployment_mode
+        from adloop.runtime import set_deployment_mode
 
         monkeypatch.setattr(
             conversion_actions, "_read_upload_csv", lambda _p: (_ for _ in ()).throw(
@@ -1762,7 +1794,7 @@ class TestCsvInputHardening:
 
         rows, errors = conversion_actions._read_upload_csv(path)
         assert rows                      # readable
-        _, errors = conversion_actions._column_map(rows[0], ["Expected A"])
+        _, errors = conversion_actions._column_map(rows[0][1], ["Expected A"])
         assert errors and "SECRET-COLUMN-NAME" not in " ".join(errors)
         assert "Expected A" in errors[0]
 
@@ -1832,11 +1864,13 @@ class TestUploadBatching:
         assert [len(c["conversions"]) for c in upload.calls] == [2000, 501]
         assert result["batch_count"] == 2
         assert result["uploaded_total"] == 2501
+        # Hand-built rows have no source_line, so the ledger falls back to
+        # positions; a real draft reports the CSV lines (see the test below).
         assert result["batches"] == [
-            {"batch": 1, "first_row": 1, "last_row": 2000, "uploaded": 2000,
-             "success_count": 2000, "failure_count": 0},
-            {"batch": 2, "first_row": 2001, "last_row": 2501, "uploaded": 501,
-             "success_count": 501, "failure_count": 0},
+            {"batch": 1, "first_source_line": 1, "last_source_line": 2000,
+             "uploaded": 2000, "success_count": 2000, "failure_count": 0},
+            {"batch": 2, "first_source_line": 2001, "last_source_line": 2501,
+             "uploaded": 501, "success_count": 501, "failure_count": 0},
         ]
 
     def test_partial_failure_is_always_switched_on(self):
@@ -1862,9 +1896,13 @@ class TestUploadBatching:
 
         message = str(excinfo.value)
         assert "batch 2 of 2" in message
-        assert "rows 2001-2501 of 2501" in message
+        assert "CSV lines 2001-2501" in message
         assert "2000 row(s) from 1 batch(es) are already uploaded" in message
-        assert "resume the CSV at row 2001" in message
+        assert "resume the CSV at line 2001" in message
+        # The ledger travels as data, not only inside the text.
+        assert excinfo.value.uploaded_total == 2000
+        assert excinfo.value.resume_from_line == 2001
+        assert excinfo.value.batches[0]["uploaded"] == 2000
 
     def test_ec_upload_batches_too(self):
         upload = _FakeClickUploadService(results_count=10_000)
@@ -1879,6 +1917,8 @@ class TestUploadBatching:
                 "phone_sha256": "",
                 "first_name_sha256": "",
                 "last_name_sha256": "",
+                "postal_code": "",
+                "country_code": "",
                 "conversion_name": "A",
                 "conversion_time": "2026-03-01 13:00:00+00:00",
                 "conversion_value": 1.0,
@@ -1948,7 +1988,8 @@ class TestSkippedAndUnmatchableRows:
 
         assert plan.changes["row_count"] == 1
         assert plan.changes["skipped_count"] == 2
-        assert [s["row"] for s in plan.changes["skipped_rows"]] == [2, 3]
+        # Physical CSV lines: header is line 1, so the two broken rows are 3 and 4.
+        assert [s["row"] for s in plan.changes["skipped_rows"]] == [3, 4]
         assert "empty" in plan.changes["skipped_rows"][0]["reason"]
         assert "E.164" in plan.changes["skipped_rows"][1]["reason"]
         assert len(plan.apply_only_payload["rows"]) == 1
@@ -1968,7 +2009,7 @@ class TestSkippedAndUnmatchableRows:
         )
 
         assert "Nothing was planned" in result["error"]
-        assert result["skipped_rows"][0]["row"] == 1
+        assert result["skipped_rows"][0]["row"] == 2   # header is line 1
 
     def test_ec_rows_without_any_identifier_are_reported(self, config, tmp_path, monkeypatch):
         _patch_drafts_client(monkeypatch, "UPLOAD_CLICKS")
@@ -1989,7 +2030,8 @@ class TestSkippedAndUnmatchableRows:
         assert plan.changes["skipped_count"] == 1
         assert "no usable identifier" in plan.changes["skipped_rows"][0]["reason"]
 
-    def test_name_only_rows_are_kept_but_warned(self, config, tmp_path, monkeypatch):
+    def test_name_only_rows_are_skipped(self, config, tmp_path, monkeypatch):
+        """Google needs country + postal next to hashed names, not instead of them."""
         _patch_drafts_client(monkeypatch, "UPLOAD_CLICKS")
         path = tmp_path / "leads.csv"
         path.write_text(
@@ -2000,12 +2042,107 @@ class TestSkippedAndUnmatchableRows:
         result = conversion_actions.draft_upload_enhanced_conversions_for_leads(
             config, customer_id="1234567890", csv_path=str(path)
         )
+
+        assert "Nothing was planned" in result["error"]
+        assert "country code and postal code" in result["skipped_rows"][0]["reason"]
+
+    def test_names_with_a_partial_address_are_skipped(self, config, tmp_path, monkeypatch):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CLICKS")
+        path = tmp_path / "leads.csv"
+        path.write_text(
+            _EC_HEADER_ADDRESS + "\n"
+            + ",,Test,User,A,2026-03-01T12:00:00Z,10,USD,DE,\n"
+        )
+
+        result = conversion_actions.draft_upload_enhanced_conversions_for_leads(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+
+        assert "Nothing was planned" in result["error"]
+        assert "incomplete" in result["skipped_rows"][0]["reason"]
+
+    def test_an_address_without_names_is_skipped(self, config, tmp_path, monkeypatch):
+        """Country + postal alone identify nobody."""
+        _patch_drafts_client(monkeypatch, "UPLOAD_CLICKS")
+        path = tmp_path / "leads.csv"
+        path.write_text(
+            _EC_HEADER_ADDRESS + "\n"
+            + ",,,,A,2026-03-01T12:00:00Z,10,USD,DE,85521\n"
+        )
+
+        result = conversion_actions.draft_upload_enhanced_conversions_for_leads(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+
+        assert "Nothing was planned" in result["error"]
+        assert "no names" in result["skipped_rows"][0]["reason"]
+
+    def test_names_plus_a_complete_address_are_usable(self, config, tmp_path, monkeypatch):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CLICKS")
+        path = tmp_path / "leads.csv"
+        path.write_text(
+            _EC_HEADER_ADDRESS + "\n"
+            + ",,Test,User,A,2026-03-01T12:00:00Z,10,USD,de, 855 21 \n"
+        )
+
+        result = conversion_actions.draft_upload_enhanced_conversions_for_leads(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
         plan = _stored_plan(result)
 
-        # Name-only is kept (Google may match names), but the preview says why
-        # it usually will not.
         assert plan.changes["row_count"] == 1
-        assert any("only hashed names" in w for w in plan.changes["match_warnings"])
+        assert plan.changes["skipped_count"] == 0
+        row = plan.apply_only_payload["rows"][0]
+        assert row["country_code"] == "DE"      # upper-cased
+        # Only surrounding whitespace is trimmed: Google documents no
+        # canonical form for postal codes, so inner spaces are left alone.
+        assert row["postal_code"] == "855 21"
+
+    def test_an_invalid_country_code_drops_the_address_not_the_row(
+        self, config, tmp_path, monkeypatch
+    ):
+        """A typo in the country column must not cost a lead its email match."""
+        _patch_drafts_client(monkeypatch, "UPLOAD_CLICKS")
+        path = tmp_path / "leads.csv"
+        path.write_text(
+            _EC_HEADER_ADDRESS + "\n"
+            + "user@example.com,,Test,User,A,2026-03-01T12:00:00Z,10,USD,"
+              "Germany,85521\n"
+        )
+
+        result = conversion_actions.draft_upload_enhanced_conversions_for_leads(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+        plan = _stored_plan(result)
+
+        assert plan.changes["row_count"] == 1
+        assert plan.changes["skipped_count"] == 0
+        row = plan.apply_only_payload["rows"][0]
+        assert row["email_sha256"]                     # kept
+        assert row["country_code"] == ""               # address dropped
+        assert row["postal_code"] == ""
+        assert any(
+            "two-letter ISO code" in w and "row 2" in w.lower()
+            for w in plan.changes["parse_warnings"]
+        )
+
+    def test_a_row_left_without_identifier_is_skipped_not_a_parse_error(
+        self, config, tmp_path, monkeypatch
+    ):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CLICKS")
+        path = tmp_path / "leads.csv"
+        path.write_text(
+            _EC_HEADER_ADDRESS + "\n"
+            + ",,Test,User,A,2026-03-01T12:00:00Z,10,USD,Germany,85521\n"
+        )
+
+        result = conversion_actions.draft_upload_enhanced_conversions_for_leads(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+
+        assert "Nothing was planned" in result["error"]
+        assert result["skipped_rows"][0]["row"] == 2
+        assert "country code and postal code" in result["skipped_rows"][0]["reason"]
 
     def test_a_non_e164_phone_drops_the_identifier_and_warns(self, config, tmp_path, monkeypatch):
         _patch_drafts_client(monkeypatch, "UPLOAD_CLICKS")
@@ -2200,10 +2337,6 @@ class TestDryRunUsesValidateOnly:
             ),
         )
 
-    def test_call_upload_dry_run_is_validate_only(self, tmp_path, monkeypatch):
-        config = self._config(tmp_path)
-        preview, client = self._call_draft(config, tmp_path, monkeypatch)
-
     def _call_draft(self, config, tmp_path, monkeypatch):
         client = _client_with(
             upload_service=_FakeUploadService(results_count=1),
@@ -2221,7 +2354,8 @@ class TestDryRunUsesValidateOnly:
         )
         return preview, client
 
-    def test_call_upload_dry_run_is_validate_only(self, config, tmp_path, monkeypatch):
+    def test_call_upload_dry_run_is_validate_only(self, tmp_path, monkeypatch):
+        config = self._config(tmp_path)
         preview, client = self._call_draft(config, tmp_path, monkeypatch)
 
         result = write.confirm_and_apply(
@@ -2258,3 +2392,327 @@ class TestDryRunUsesValidateOnly:
 
         assert result["status"] == "DRY_RUN_SUCCESS", result
         assert upload.calls[0]["validate_only"] is True
+
+
+class TestNormalizationMatchesGoogleDocs:
+    """Google's upload-identifiers page spells out the canonicalization.
+
+    Getting this wrong does not raise an error — it just never matches, which
+    is why each rule has a test of its own.
+    """
+
+    def test_gmail_dots_and_plus_tags_are_removed(self):
+        assert (
+            conversion_actions._normalize_email("Jane.Doe+Shopping@googlemail.com")
+            == "janedoe@googlemail.com"
+        )
+        assert (
+            conversion_actions._normalize_email("jane.doe+shopping@gmail.com")
+            == "janedoe@gmail.com"
+        )
+
+    def test_other_domains_keep_dots_and_plus_tags(self):
+        assert (
+            conversion_actions._normalize_email("user.name+NYC@Example.com")
+            == "user.name+nyc@example.com"
+        )
+
+    def test_email_whitespace_is_removed_but_names_are_only_trimmed(self):
+        assert (
+            conversion_actions._normalize_email(" User@Example.com ")
+            == "user@example.com"
+        )
+        # Google's own example hashes names with plain ``strip().lower()``:
+        # inner spaces survive, so "Anna Lena" stays "anna lena".
+        assert conversion_actions._normalize_name("  Anna   Maria ") == "anna   maria"
+        assert conversion_actions._normalize_name("von der Berg") == "von der berg"
+
+    def test_a_malformed_address_is_left_alone(self):
+        # No "@": whiten it, do not invent a domain.
+        assert conversion_actions._normalize_email("Not An Email") == "notanemail"
+        assert conversion_actions._normalize_email("") == ""
+
+
+class TestPartialUploadRetiresThePlan:
+    """A half-finished upload must not be run again from the same plan.
+
+    ``confirm_and_apply`` kept the plan after a failed apply, so the reflex
+    "confirm again" resent every batch that had already gone through — and call
+    conversions have no dedup key, so those rows would be counted twice.
+    """
+
+    def _config(self, tmp_path, **safety):
+        safety.setdefault("require_dry_run", False)
+        return AdLoopConfig(
+            ads=AdsConfig(customer_id="123-456-7890"),
+            safety=SafetyConfig(log_file=str(tmp_path / "audit.log"), **safety),
+        )
+
+    def _plan(self, tmp_path, monkeypatch, *, rows=2501, fail_on_call=2):
+        upload = _FakeUploadService(results_count=10_000, fail_on_call=fail_on_call)
+        client = _client_with(
+            upload_service=upload, ads_service=_EchoActionRows("UPLOAD_CALLS")
+        )
+        monkeypatch.setattr("adloop.ads.client.get_ads_client", lambda _cfg: client)
+        path = tmp_path / "phone.csv"
+        body = "".join(
+            f"+1555555{i:04d},2026-03-01T12:00:00Z,My Action,"
+            f"2026-03-01T13:00:00Z,10,USD\n"
+            for i in range(rows)
+        )
+        path.write_text(_CALL_HEADER + body)
+        preview = conversion_actions.draft_upload_call_conversions(
+            self._config(tmp_path), customer_id="1234567890", csv_path=str(path)
+        )
+        return preview, upload
+
+    def test_the_response_carries_the_ledger_and_the_resume_line(
+        self, tmp_path, monkeypatch
+    ):
+        config = self._config(tmp_path)
+        preview, _upload = self._plan(tmp_path, monkeypatch)
+
+        result = write.confirm_and_apply(
+            config, plan_id=preview["plan_id"], dry_run=False
+        )
+
+        assert result["status"] == "PARTIAL_UPLOAD", result
+        assert result["uploaded_total"] == 2000
+        assert result["batches"][0]["first_source_line"] == 2   # header is line 1
+        assert result["batches"][0]["last_source_line"] == 2001
+        assert result["resume_from_line"] == 2002                # first line of batch 2
+
+    def test_a_second_confirm_cannot_resend_the_first_batches(
+        self, tmp_path, monkeypatch
+    ):
+        config = self._config(tmp_path)
+        preview, upload = self._plan(tmp_path, monkeypatch)
+
+        first = write.confirm_and_apply(
+            config, plan_id=preview["plan_id"], dry_run=False
+        )
+        assert first["status"] == "PARTIAL_UPLOAD"
+        assert len(upload.calls) == 2          # batch 1 sent, batch 2 failed
+
+        again = write.confirm_and_apply(
+            config, plan_id=preview["plan_id"], dry_run=False
+        )
+
+        assert "No pending plan found" in again["error"]
+        assert len(upload.calls) == 2          # nothing was sent a second time
+
+    def test_the_audit_log_records_the_partial_upload(self, tmp_path, monkeypatch):
+        config = self._config(tmp_path)
+        preview, _upload = self._plan(tmp_path, monkeypatch)
+
+        write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=False)
+
+        logged = (tmp_path / "audit.log").read_text()
+        assert '"result": "partial_upload"' in logged
+        assert "15555550000" not in logged     # no raw caller ids in the log
+
+    def test_a_failed_dry_run_does_not_claim_an_upload_happened(
+        self, tmp_path, monkeypatch
+    ):
+        """In validate-only mode nothing was written, so the wording must differ."""
+        config = self._config(tmp_path, require_dry_run=True)
+        preview, _upload = self._plan(tmp_path, monkeypatch)
+        # Restore the real validate-only path the suite's fixture stubs out.
+        monkeypatch.setattr(
+            write,
+            "_validate_with_google",
+            lambda cfg, plan: write._execute_plan(cfg, plan, validate_only=True),
+        )
+
+        result = write.confirm_and_apply(
+            config, plan_id=preview["plan_id"], dry_run=True
+        )
+
+        assert result["status"] == "DRY_RUN_FAILED", result
+        assert "Nothing was uploaded" in result["error"]
+        assert "already uploaded" not in result["error"]
+        # The plan stays pending: nothing happened, so it is still the caller's
+        # to fix or discard (unlike a real partial upload, which retires it).
+        assert preview_store.get_plan(preview["plan_id"]) is not None
+
+
+class TestSourceLinesSurviveCommentsAndSkips:
+    """Only one numbering scheme may be used in messages: the physical line."""
+
+    def _draft(self, config, tmp_path, monkeypatch, body: str):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CALLS")
+        path = tmp_path / "phone.csv"
+        path.write_text(body)
+        return conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+
+    def test_skipped_rows_name_the_physical_line(self, config, tmp_path, monkeypatch):
+        body = (
+            "Parameters:TimeZone=Europe/Berlin\n"          # physical line 1
+            "# comment\n"                                   # physical line 2
+            + _CALL_HEADER                                  # physical line 3
+            + "+15555550142,2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,10,USD\n"  # 4
+            + ",2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,10,USD\n"              # 5
+        )
+
+        result = self._draft(config, tmp_path, monkeypatch, body)
+        plan = _stored_plan(result)
+
+        assert [s["row"] for s in plan.changes["skipped_rows"]] == [5]
+
+    def test_the_ledger_names_physical_lines(self, config, tmp_path, monkeypatch):
+        body = (
+            "# comment\n"                                   # physical line 1
+            + _CALL_HEADER                                  # physical line 2
+            + "+15555550142,2026-03-01T12:00:00Z,A,"
+              "2026-03-01T13:00:00Z,10,USD\n"               # physical line 3
+        )
+        result = self._draft(config, tmp_path, monkeypatch, body)
+        plan = _stored_plan(result)
+
+        upload = _FakeUploadService(results_count=1)
+        client = _client_with(
+            upload_service=upload, ads_service=_EchoActionRows("UPLOAD_CALLS")
+        )
+        out = conversion_actions._apply_upload_call_conversions(
+            client, "1234567890", plan.apply_payload()
+        )
+
+        assert out["batches"][0]["first_source_line"] == 3
+        assert out["batches"][0]["last_source_line"] == 3
+
+
+class TestRecordStartLine:
+    """The resume hint must point at the record, not into the middle of it."""
+
+    def test_a_quoted_multi_line_field_reports_its_first_line(self, tmp_path):
+        path = tmp_path / "upload.csv"
+        path.write_text(
+            _CALL_HEADER  # line 1
+            + '+15555550142,2026-03-01T12:00:00Z,"Multi\nline",'
+              "2026-03-01T13:00:00Z,10,USD\n"      # starts line 2, ends line 3
+            + "+15555550143,2026-03-01T12:00:00Z,A,"
+              "2026-03-01T13:00:00Z,10,USD\n"      # line 4
+        )
+
+        records, errors = conversion_actions._read_upload_csv(str(path))
+
+        assert errors == []
+        assert [line for line, _ in records] == [1, 2, 4]
+
+    def test_the_batch_ledger_uses_the_parsed_line(self, tmp_path):
+        path = tmp_path / "upload.csv"
+        path.write_text(
+            _CALL_HEADER
+            + "+15555550142,2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,10,USD\n"
+        )
+
+        rows, _ = conversion_actions._parse_call_conversion_csv(str(path))
+        assert rows[0]["source_line"] == 2      # header is line 1
+        upload = _FakeUploadService(results_count=1)
+        client = _client_with(
+            upload_service=upload, ads_service=_EchoActionRows("UPLOAD_CALLS")
+        )
+
+        out = conversion_actions._apply_upload_call_conversions(
+            client,
+            "1234567890",
+            {
+                "row_count": 1,
+                "rows": rows,
+                "conversion_actions": {"A": "customers/1/conversionActions/1"},
+            },
+        )
+
+        assert out["batches"][0]["first_source_line"] == 2
+
+
+class TestAddressCountingMatchesWhatIsSent:
+    """The preview must not count an address the applier leaves out."""
+
+    def _draft(self, config, tmp_path, monkeypatch, body: str):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CLICKS")
+        path = tmp_path / "leads.csv"
+        path.write_text(body)
+        return conversion_actions.draft_upload_enhanced_conversions_for_leads(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+
+    def test_a_half_address_is_not_counted(self, config, tmp_path, monkeypatch):
+        # Country + postal, but no names: usable only through the email, and the
+        # address never goes out.
+        result = self._draft(
+            config, tmp_path, monkeypatch,
+            _EC_HEADER_ADDRESS + "\n"
+            + "user@example.com,,, ,A,2026-03-01T12:00:00Z,10,USD,DE,85521\n",
+        )
+        plan = _stored_plan(result)
+
+        assert plan.changes["rows_with_address"] == 0
+        assert plan.changes["skipped_count"] == 0
+        warning = " ".join(plan.changes["match_warnings"])
+        assert "no first and last name" in warning
+        assert "first affected rows: [2]" in warning
+
+    def test_names_without_address_columns_say_what_to_add(
+        self, config, tmp_path, monkeypatch
+    ):
+        """The common lead export: names and an email, no address columns."""
+        result = self._draft(
+            config, tmp_path, monkeypatch,
+            _EC_HEADER + "\n"
+            + "user@example.com,+15555550142,Test,User,A,"
+              "2026-03-01T12:00:00Z,10,USD\n",
+        )
+        plan = _stored_plan(result)
+
+        assert plan.changes["rows_with_address"] == 0
+        warning = " ".join(plan.changes["match_warnings"])
+        assert "add a 'Country Code' and a 'Postal Code' column" in warning
+        assert "first affected rows: [2]" in warning
+
+    def test_a_complete_address_is_counted_and_not_warned(
+        self, config, tmp_path, monkeypatch
+    ):
+        result = self._draft(
+            config, tmp_path, monkeypatch,
+            _EC_HEADER_ADDRESS + "\n"
+            + ",,Test,User,A,2026-03-01T12:00:00Z,10,USD,DE,85521\n",
+        )
+        plan = _stored_plan(result)
+
+        assert plan.changes["rows_with_address"] == 1
+        assert not plan.changes["match_warnings"]
+
+    def test_the_applier_sends_exactly_what_was_counted(
+        self, config, tmp_path, monkeypatch
+    ):
+        """One row with a complete address, one with a half one."""
+        result = self._draft(
+            config, tmp_path, monkeypatch,
+            _EC_HEADER_ADDRESS + "\n"
+            + ",,Test,User,A,2026-03-01T12:00:00Z,10,USD,DE,85521\n"
+            + "second@example.com,,, ,A,2026-03-01T12:00:00Z,10,USD,DE,85521\n",
+        )
+        plan = _stored_plan(result)
+
+        upload = _FakeClickUploadService(results_count=10)
+        ads = _FakeGoogleAdsService([
+            _FakeSearchRow(
+                "A", "customers/1/conversionActions/8", type_name="UPLOAD_CLICKS"
+            )
+        ])
+        conversion_actions._apply_upload_enhanced_conversions_for_leads(
+            _ec_client_with(upload=upload, ads=ads),
+            "1234567890",
+            plan.apply_payload(),
+        )
+
+        sent = upload.calls[0]["conversions"]
+        addresses = [
+            uid.address_info
+            for cc in sent for uid in cc.user_identifiers
+            if uid.address_info.hashed_first_name
+        ]
+        assert len(addresses) == plan.changes["rows_with_address"] == 1
