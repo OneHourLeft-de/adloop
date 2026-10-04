@@ -3377,6 +3377,244 @@ def check_brand_names(
         customer_id=customer_id or current_config().ads.customer_id,
     )
 
+@mcp.tool(title="List brand lists", annotations=_READONLY, tags={"ads"})
+@_safe
+def get_brand_lists(
+    customer_id: str = "",
+) -> dict:
+    """List all brand lists (SharedSets of type BRANDS) in the account.
+
+    Returns each list's ID, name, status, and member count. Call this before
+    propose_brand_list so an existing list can be reused instead of duplicated.
+
+    Args:
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.brands import get_brand_lists as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+    )
+
+@mcp.tool(title="Brands in a brand list", annotations=_READONLY, tags={"ads"})
+@_safe
+def get_brand_list_brands(
+    shared_set_id: str,
+    customer_id: str = "",
+) -> dict:
+    """List the brands inside a brand list.
+
+    Each entry carries brand.entity_id (the Commercial KG MID that
+    suggest_brands returns as id), the display name, primary URL, status and a
+    criterion_id — the latter is what remove_from_brand_list needs.
+
+    Args:
+        shared_set_id: Numeric list ID from get_brand_lists (shared_set.id).
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.brands import get_brand_list_brands as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        shared_set_id=shared_set_id,
+    )
+
+@mcp.tool(title="Campaigns using a brand list", annotations=_READONLY, tags={"ads"})
+@_safe
+def get_brand_list_campaigns(
+    shared_set_id: str = "",
+    customer_id: str = "",
+) -> dict:
+    """List which campaigns a brand list is attached to.
+
+    Brand lists attach as CampaignCriterion rows of type BRAND_LIST (not as
+    CampaignSharedSet like negative keyword lists), so each entry also reports
+    `role`: "excluded" when the criterion is negative, "targeted" when it
+    restricts targeting to the list.
+
+    Args:
+        shared_set_id: Numeric list ID from get_brand_lists. Omit to see all
+            brand-list attachments in the account.
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.brands import get_brand_list_campaigns as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        shared_set_id=shared_set_id,
+    )
+
+@mcp.tool(title="Draft a brand list", annotations=_WRITE, tags={"ads"})
+@_safe
+def propose_brand_list(
+    list_name: str,
+    brand_ids: _StrList,
+    campaign_ids: _StrList = [],  # noqa: B006 — mutable default required for MCP JSON schema
+    negative: bool = True,
+    customer_id: str = "",
+) -> dict:
+    """Draft a brand list and optionally attach it to campaigns — returns a PREVIEW.
+
+    Creates a SharedSet of type BRANDS, fills it with brands, and — when
+    campaign_ids is given — attaches it to those campaigns.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+
+    Args:
+        list_name: Name for the new list, as it should appear in Google Ads.
+        brand_ids: Commercial Knowledge Graph MIDs — the `id` field from
+            suggest_brands / check_brand_names. Resolve names there first; a
+            display name alone cannot be written.
+        campaign_ids: Optional. Omit to create the list without using it yet,
+            then attach later with attach_brand_list_to_campaigns.
+        negative: True (default) excludes the brands from those campaigns;
+            False restricts targeting to them instead.
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.write import propose_brand_list as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        list_name=list_name,
+        brand_ids=brand_ids,
+        campaign_ids=campaign_ids,
+        negative=negative,
+    )
+
+@mcp.tool(title="Draft additions to a brand list", annotations=_WRITE, tags={"ads"})
+@_safe
+def add_to_brand_list(
+    shared_set_id: str,
+    brand_ids: _StrList,
+    customer_id: str = "",
+) -> dict:
+    """Append brands to an EXISTING brand list — returns a PREVIEW.
+
+    Use this when the list already exists and only needs more brands (instead
+    of propose_brand_list, which creates a new list). Call get_brand_lists for
+    the shared_set_id and get_brand_list_brands first to avoid adding a brand
+    twice.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+
+    Args:
+        shared_set_id: Numeric list ID from get_brand_lists.
+        brand_ids: Commercial Knowledge Graph MIDs from suggest_brands.
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.write import add_to_brand_list as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        shared_set_id=shared_set_id,
+        brand_ids=brand_ids,
+    )
+
+@mcp.tool(title="Draft removing brands from a list", annotations=_DESTRUCTIVE, tags={"ads"})
+@_safe
+def remove_from_brand_list(
+    shared_set_id: str,
+    criterion_ids: _StrList,
+    customer_id: str = "",
+) -> dict:
+    """Remove brands from a brand list — returns a PREVIEW.
+
+    SharedCriteria have no status field, so removal is the only way to take a
+    brand out of a list — there is nothing to pause. Removing a brand does not
+    detach the list from any campaign.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+
+    Args:
+        shared_set_id: Numeric list ID from get_brand_lists.
+        criterion_ids: Numeric criterion_id values from get_brand_list_brands.
+            This is irreversible — the brand leaves the list immediately.
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.write import remove_from_brand_list as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        shared_set_id=shared_set_id,
+        criterion_ids=criterion_ids,
+    )
+
+@mcp.tool(title="Draft attaching a brand list", annotations=_WRITE, tags={"ads"})
+@_safe
+def attach_brand_list_to_campaigns(
+    shared_set_id: str,
+    campaign_ids: _StrList,
+    negative: bool = True,
+    customer_id: str = "",
+) -> dict:
+    """Attach an existing brand list to one or more campaigns — returns a PREVIEW.
+
+    Creates a CampaignCriterion.brand_list per campaign. This is NOT the
+    CampaignSharedSet linkage used for negative keyword lists — brand lists are
+    criteria, and `negative` decides the role: True excludes the brands
+    (default), False restricts targeting to the list.
+
+    Use get_brand_lists for the shared_set_id and get_brand_list_campaigns to
+    inspect existing attachments before attaching.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+
+    Args:
+        shared_set_id: Numeric list ID from get_brand_lists.
+        campaign_ids: Numeric campaign IDs to attach the list to.
+        negative: True (default) excludes the brands from those campaigns;
+            False restricts targeting to them instead.
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.write import attach_brand_list_to_campaigns as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        shared_set_id=shared_set_id,
+        campaign_ids=campaign_ids,
+        negative=negative,
+    )
+
+@mcp.tool(title="Draft detaching a brand list", annotations=_DESTRUCTIVE, tags={"ads"})
+@_safe
+def detach_brand_list_from_campaigns(
+    shared_set_id: str,
+    campaign_ids: _StrList,
+    customer_id: str = "",
+) -> dict:
+    """Detach a brand list from one or more campaigns — returns a PREVIEW.
+
+    Removes the CampaignCriterion rows linking the list to those campaigns; the
+    list itself and its brands are unchanged. Campaigns that do not carry the
+    list are reported as `not_attached` in the apply result instead of
+    failing the batch.
+
+    Use get_brand_list_campaigns to inspect existing attachments first.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+
+    Args:
+        shared_set_id: Numeric list ID from get_brand_lists.
+        campaign_ids: Numeric campaign IDs to detach the list from. Campaigns
+            that do not carry the list are reported, not treated as errors.
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.write import detach_brand_list_from_campaigns as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        shared_set_id=shared_set_id,
+        campaign_ids=campaign_ids,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Optional local-only debug tools (not shipped in git).
