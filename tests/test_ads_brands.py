@@ -277,6 +277,26 @@ class TestBrandToolRegistration:
         properties = tool.parameters["properties"]
         assert {"brand_prefix", "selected_brand_ids", "customer_id"} <= set(properties)
 
+    @pytest.mark.asyncio
+    async def test_both_brand_read_tools_describe_their_parameters(self):
+        """FastMCP only lifts an ``Args:`` block into the per-parameter schema.
+
+        Without it a client sees ``brand_prefix: string`` and nothing about
+        what belongs in there — for the tool whose whole job is resolving a
+        free-text name that is the difference between a usable and a guessed
+        call.
+        """
+        from adloop.server import mcp
+
+        tools = {t.name: t for t in await mcp.list_tools()}
+        for name, params in (
+            ("suggest_brands", ("brand_prefix", "selected_brand_ids", "customer_id")),
+            ("check_brand_names", ("brand_names", "customer_id")),
+        ):
+            properties = tools[name].parameters["properties"]
+            for param in params:
+                assert properties[param].get("description"), f"{name}.{param}"
+
 
 # ---------------------------------------------------------------------------
 # Brand lists — read side
