@@ -3497,7 +3497,6 @@ def draft_remove_conversion_action(
 @_safe
 def draft_upload_call_conversions(
     csv_path: str,
-    partial_failure: bool = True,
     consent: dict | None = None,
     customer_id: str = "",
 ) -> dict:
@@ -3526,7 +3525,6 @@ def draft_upload_call_conversions(
         current_config(),
         customer_id=customer_id or current_config().ads.customer_id,
         csv_path=csv_path,
-        partial_failure=partial_failure,
         consent=consent,
     )
 
@@ -3535,7 +3533,6 @@ def draft_upload_call_conversions(
 @_safe
 def draft_upload_enhanced_conversions_for_leads(
     csv_path: str,
-    partial_failure: bool = True,
     consent: dict | None = None,
     customer_id: str = "",
 ) -> dict:
@@ -3565,7 +3562,6 @@ def draft_upload_enhanced_conversions_for_leads(
         current_config(),
         customer_id=customer_id or current_config().ads.customer_id,
         csv_path=csv_path,
-        partial_failure=partial_failure,
         consent=consent,
     )
 

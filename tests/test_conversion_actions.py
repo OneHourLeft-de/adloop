@@ -753,10 +753,14 @@ class TestConsentParam:
 
 
 class _FakeUploadService:
-    def __init__(self, results_count: int = 0, error_message: str = ""):
+    def __init__(
+        self, results_count: int = 0, error_message: str = "", fail_on_call: int = 0
+    ):
         self.called_with: dict | None = None
+        self.calls: list[dict] = []
         self._results_count = results_count
         self._error_message = error_message
+        self._fail_on_call = fail_on_call
 
     def upload_call_conversions(
         self, *, customer_id, conversions, partial_failure
@@ -766,6 +770,9 @@ class _FakeUploadService:
             "conversions": list(conversions),
             "partial_failure": partial_failure,
         }
+        self.calls.append(dict(self.called_with))
+        if self._fail_on_call and len(self.calls) == self._fail_on_call:
+            raise RuntimeError("batch rejected by Google")
         # Mark the first N results as accepted (conversion_action populated).
         results = []
         for i, c in enumerate(conversions):
@@ -784,10 +791,14 @@ class _FakeUploadService:
 
 
 class _FakeClickUploadService:
-    def __init__(self, results_count: int = 0, error_message: str = ""):
+    def __init__(
+        self, results_count: int = 0, error_message: str = "", fail_on_call: int = 0
+    ):
         self.called_with: dict | None = None
+        self.calls: list[dict] = []
         self._results_count = results_count
         self._error_message = error_message
+        self._fail_on_call = fail_on_call
 
     def upload_click_conversions(
         self, *, customer_id, conversions, partial_failure
@@ -797,6 +808,9 @@ class _FakeClickUploadService:
             "conversions": list(conversions),
             "partial_failure": partial_failure,
         }
+        self.calls.append(dict(self.called_with))
+        if self._fail_on_call and len(self.calls) == self._fail_on_call:
+            raise RuntimeError("batch rejected by Google")
         results = []
         for i, c in enumerate(conversions):
             results.append(SimpleNamespace(
@@ -1706,3 +1720,119 @@ class TestCsvInputHardening:
         )
         assert errors == []
         assert len(rows) == 1
+
+
+class TestUploadBatching:
+    """One request per 2,000 rows, with a ledger — and a resume point on failure."""
+
+    def _changes(self, rows: int) -> dict:
+        return {
+            "row_count": rows,
+            "rows": [
+                {
+                    "caller_id": f"+1555555{i:04d}",
+                    "call_start_time": "2026-03-01 12:00:00+00:00",
+                    "conversion_name": "A",
+                    "conversion_time": "2026-03-01 13:00:00+00:00",
+                    "conversion_value": 1.0,
+                    "currency_code": "USD",
+                }
+                for i in range(rows)
+            ],
+        }
+
+    def _ads(self):
+        return _FakeGoogleAdsService([
+            _FakeSearchRow("A", "customers/1/conversionActions/7")
+        ])
+
+    def test_rows_are_split_at_the_api_limit(self):
+        upload = _FakeUploadService(results_count=10_000)
+        client = _client_with(upload_service=upload, ads_service=self._ads())
+
+        result = conversion_actions._apply_upload_call_conversions(
+            client, "1234567890", self._changes(2501)
+        )
+
+        assert [len(c["conversions"]) for c in upload.calls] == [2000, 501]
+        assert result["batch_count"] == 2
+        assert result["uploaded_total"] == 2501
+        assert result["batches"] == [
+            {"batch": 1, "first_row": 1, "last_row": 2000, "uploaded": 2000,
+             "success_count": 2000, "failure_count": 0},
+            {"batch": 2, "first_row": 2001, "last_row": 2501, "uploaded": 501,
+             "success_count": 501, "failure_count": 0},
+        ]
+
+    def test_partial_failure_is_always_switched_on(self):
+        upload = _FakeUploadService(results_count=1)
+        client = _client_with(upload_service=upload, ads_service=self._ads())
+
+        conversion_actions._apply_upload_call_conversions(
+            client, "1234567890", self._changes(1)
+        )
+
+        assert upload.calls[0]["partial_failure"] is True
+
+    def test_a_failed_batch_reports_what_is_already_uploaded(self):
+        # Batch 1 goes through, batch 2 does not. A blind retry would
+        # double-count the first 2,000 calls — there is no dedup key for them.
+        upload = _FakeUploadService(results_count=10_000, fail_on_call=2)
+        client = _client_with(upload_service=upload, ads_service=self._ads())
+
+        with pytest.raises(RuntimeError) as excinfo:
+            conversion_actions._apply_upload_call_conversions(
+                client, "1234567890", self._changes(2501)
+            )
+
+        message = str(excinfo.value)
+        assert "batch 2 of 2" in message
+        assert "rows 2001-2501 of 2501" in message
+        assert "2000 row(s) from 1 batch(es) are already uploaded" in message
+        assert "resume the CSV at row 2001" in message
+
+    def test_ec_upload_batches_too(self):
+        upload = _FakeClickUploadService(results_count=10_000)
+        ads = _FakeGoogleAdsService([
+            _FakeSearchRow(
+                "A", "customers/1/conversionActions/8", type_name="UPLOAD_CLICKS"
+            )
+        ])
+        rows = [
+            {
+                "email_sha256": _EMAIL_HASH,
+                "phone_sha256": "",
+                "first_name_sha256": "",
+                "last_name_sha256": "",
+                "conversion_name": "A",
+                "conversion_time": "2026-03-01 13:00:00+00:00",
+                "conversion_value": 1.0,
+                "currency_code": "USD",
+                "order_id": f"order-{i}",
+            }
+            for i in range(2001)
+        ]
+
+        result = conversion_actions._apply_upload_enhanced_conversions_for_leads(
+            _ec_client_with(upload=upload, ads=ads),
+            "1234567890",
+            {"row_count": 2001, "rows": rows},
+        )
+
+        assert [len(c["conversions"]) for c in upload.calls] == [2000, 1]
+        assert result["batch_count"] == 2
+
+    def test_upload_plans_ask_for_a_second_confirmation(self, config, tmp_path):
+        """A signal to the model — the brake that enforces anything is
+        safety.two_phase_apply, which the Google path does not read."""
+        path = tmp_path / "phone.csv"
+        path.write_text(
+            _CALL_HEADER
+            + "+15555550142,2026-03-01T12:00:00Z,A,"
+              "2026-03-01T13:00:00Z,10,USD\n"
+        )
+        result = conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+
+        assert result["requires_double_confirm"] is True

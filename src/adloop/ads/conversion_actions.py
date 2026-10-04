@@ -870,7 +870,6 @@ def draft_upload_call_conversions(
     *,
     customer_id: str = "",
     csv_path: str,
-    partial_failure: bool = True,
     consent: dict | None = None,
 ) -> dict:
     """Draft an upload of call conversions from CSV — returns a PREVIEW.
@@ -885,8 +884,8 @@ def draft_upload_call_conversions(
     The ``Conversion Name`` value MUST exactly match an existing conversion
     action whose type is UPLOAD_CALLS.
 
-    ``partial_failure`` (default True) lets Google accept the rows that parse
-    successfully and report only the bad ones — recommended.
+    Partial failure is always on: Google requires it for uploads, and dropping
+    the whole request because one row is malformed would hide the good rows.
 
     ``consent`` (GDPR/EEA): a dict like
     ``{"ad_user_data": "GRANTED", "ad_personalization": "DENIED"}``. Values:
@@ -948,12 +947,16 @@ def draft_upload_call_conversions(
         entity_type="call_conversion_batch",
         entity_id=str(len(rows)),
         customer_id=customer_id,
+        # Signal only: on the Google path nothing enforces this flag — it tells
+        # the model the upload cannot be undone. The enforced brake is
+        # ``safety.two_phase_apply``.
+        requires_double_confirm=True,
         changes={
             "row_count": len(rows),
             "total_value": round(total_value, 2),
             "currency_hint": rows[0]["currency_code"] if rows else "USD",
             "distinct_conversion_actions": distinct_actions,
-            "partial_failure": bool(partial_failure),
+            "partial_failure": True,
             "consent": consent_norm,
             "parse_warnings": parse_errors,
             # Display sample uses REDACTED caller ids only.
@@ -1025,14 +1028,88 @@ def _resolve_conversion_action_ids(
     return mapping
 
 
+# Google rejects a single upload request above 2,000 conversions with
+# TOO_MANY_CONVERSIONS_IN_REQUEST, so a CSV larger than that is split here.
+_MAX_ROWS_PER_REQUEST = 2000
+
+
+def _upload_in_batches(rows: list[dict], send) -> dict:
+    """Send ``rows`` in API-sized batches and report progress per batch.
+
+    ``send(chunk)`` builds the protos for one chunk, calls the upload service
+    and returns ``(payload, response)``.
+
+    A failure in batch 3 leaves batches 1-2 uploaded, so the error has to say
+    which rows are already in: call uploads have no dedup key at all, and click
+    uploads only dedupe on an order id, so a blind retry double-counts whatever
+    went through. The error names the first row of the failed batch as the
+    resume point.
+    """
+    total = len(rows)
+    batch_total = (total + _MAX_ROWS_PER_REQUEST - 1) // _MAX_ROWS_PER_REQUEST
+    ledger: list[dict] = []
+    row_errors: list[dict] = []
+    success_total = 0
+
+    for index in range(batch_total):
+        start = index * _MAX_ROWS_PER_REQUEST
+        chunk = rows[start:start + _MAX_ROWS_PER_REQUEST]
+        try:
+            payload, response = send(chunk)
+        except Exception as exc:  # noqa: BLE001 — re-raised with the ledger
+            done = sum(batch["uploaded"] for batch in ledger)
+            raise RuntimeError(
+                f"Upload failed in batch {index + 1} of {batch_total} "
+                f"(rows {start + 1}-{start + len(chunk)} of {total}): {exc} "
+                f"{done} row(s) from {len(ledger)} batch(es) are already "
+                "uploaded and must not be sent again — resume the CSV at row "
+                f"{start + 1}."
+            ) from exc
+
+        results = list(response.results)
+        # Google populates the result row's ``conversion_action`` only for rows
+        # that actually matched; echoed identifiers come back for failed rows
+        # too, so they are not a success signal.
+        success = sum(
+            1 for r in results if getattr(r, "conversion_action", "")
+        )
+        success_total += success
+        ledger.append({
+            "batch": index + 1,
+            "first_row": start + 1,
+            "last_row": start + len(chunk),
+            "uploaded": len(payload),
+            "success_count": success,
+            "failure_count": len(results) - success,
+        })
+        partial = getattr(response, "partial_failure_error", None)
+        if partial and partial.message:
+            row_errors.append({
+                "type": "partial_failure",
+                "batch": index + 1,
+                "message": partial.message,
+                "code": getattr(partial, "code", None),
+            })
+
+    uploaded_total = sum(batch["uploaded"] for batch in ledger)
+    return {
+        "uploaded_total": uploaded_total,
+        "success_count": success_total,
+        "failure_count": uploaded_total - success_total,
+        "batch_count": len(ledger),
+        "batches": ledger,
+        "row_errors": row_errors,
+    }
+
+
 def _apply_upload_call_conversions(
     client: object, cid: str, changes: dict
 ) -> dict:
     """Execute the call-conversion upload via ConversionUploadService.
 
-    Builds the upload protos from ``changes["rows"]`` (frozen at preview
-    time) — the CSV is NOT re-read. Returns counts of successes / failures
-    plus per-row error details.
+    Builds the upload protos from the frozen rows (``apply_only_payload``, put
+    there at preview time) — the CSV is NOT re-read. Batches are sent one
+    request at a time; a failure says which rows are already uploaded.
     """
     rows = changes.get("rows") or []
     if not rows:
@@ -1051,52 +1128,32 @@ def _apply_upload_call_conversions(
     distinct = sorted({r["conversion_name"] for r in rows})
     action_resources = _resolve_conversion_action_ids(client, cid, distinct)
     consent = changes.get("consent")
-
-    payload: list = []
-    for r in rows:
-        cc = client.get_type("CallConversion")
-        cc.caller_id = r["caller_id"]
-        cc.call_start_date_time = r["call_start_time"]
-        cc.conversion_action = action_resources[r["conversion_name"]]
-        cc.conversion_date_time = r["conversion_time"]
-        cc.conversion_value = float(r["conversion_value"])
-        cc.currency_code = r["currency_code"]
-        _apply_consent(client, cc, consent)
-        payload.append(cc)
-
     upload_service = client.get_service("ConversionUploadService")
-    response = upload_service.upload_call_conversions(
-        customer_id=cid,
-        conversions=payload,
-        partial_failure=bool(changes.get("partial_failure", True)),
-    )
 
-    results = list(response.results)
-    # Google only populates the result row's ``conversion_action`` for rows
-    # that were actually accepted. Echoed identifiers (caller_id) come back
-    # even for FAILED rows, so counting those overreports success — key off
-    # conversion_action being populated instead.
-    success_count = sum(
-        1 for r in results if getattr(r, "conversion_action", "")
-    )
-    failure_count = len(results) - success_count
+    def _send(chunk: list[dict]):
+        payload: list = []
+        for r in chunk:
+            cc = client.get_type("CallConversion")
+            cc.caller_id = r["caller_id"]
+            cc.call_start_date_time = r["call_start_time"]
+            cc.conversion_action = action_resources[r["conversion_name"]]
+            cc.conversion_date_time = r["conversion_time"]
+            cc.conversion_value = float(r["conversion_value"])
+            cc.currency_code = r["currency_code"]
+            _apply_consent(client, cc, consent)
+            payload.append(cc)
+        response = upload_service.upload_call_conversions(
+            customer_id=cid,
+            conversions=payload,
+            # The API requires partial failure on uploads; leaving rows out of
+            # the request because one is malformed would be worse.
+            partial_failure=True,
+        )
+        return payload, response
 
-    row_errors: list[dict] = []
-    partial = getattr(response, "partial_failure_error", None)
-    if partial and partial.message:
-        row_errors.append({
-            "type": "partial_failure",
-            "message": partial.message,
-            "code": getattr(partial, "code", None),
-        })
-
-    return {
-        "uploaded_total": len(payload),
-        "success_count": success_count,
-        "failure_count": failure_count,
-        "conversion_actions_used": action_resources,
-        "row_errors": row_errors,
-    }
+    ledger = _upload_in_batches(rows, _send)
+    ledger["conversion_actions_used"] = action_resources
+    return ledger
 
 
 # ---------------------------------------------------------------------------
@@ -1193,7 +1250,6 @@ def draft_upload_enhanced_conversions_for_leads(
     *,
     customer_id: str = "",
     csv_path: str,
-    partial_failure: bool = True,
     consent: dict | None = None,
 ) -> dict:
     """Draft an Enhanced Conversions for Leads upload — returns PREVIEW.
@@ -1293,6 +1349,8 @@ def draft_upload_enhanced_conversions_for_leads(
         entity_type="ec_for_leads_batch",
         entity_id=str(len(rows)),
         customer_id=customer_id,
+        # Signal only, like the call upload — see the note there.
+        requires_double_confirm=True,
         changes={
             "row_count": len(rows),
             "total_value": round(total_value, 2),
@@ -1301,7 +1359,7 @@ def draft_upload_enhanced_conversions_for_leads(
             "rows_with_phone": with_phone,
             "rows_with_order_id": with_order_id,
             "distinct_conversion_actions": distinct_actions,
-            "partial_failure": bool(partial_failure),
+            "partial_failure": True,
             "consent": consent_norm,
             "parse_warnings": parse_errors,
             "dedup_warnings": dedup_warnings,
@@ -1375,10 +1433,11 @@ def _resolve_upload_clicks_action(
 def _apply_upload_enhanced_conversions_for_leads(
     client: object, cid: str, changes: dict
 ) -> dict:
-    """Execute EC-for-Leads upload via ConversionUploadService.
+    """Execute the EC-for-Leads upload via ConversionUploadService.
 
-    Builds the upload protos from ``changes["rows"]`` (SHA-256 hashes frozen
-    at preview time) — the CSV is NOT re-read, so no raw PII is touched here.
+    Builds the upload protos from the frozen, already-hashed rows
+    (``apply_only_payload``) — the CSV is NOT re-read, so no raw PII is touched
+    here. Batched like the call upload.
     """
     rows = changes.get("rows") or []
     if not rows:
@@ -1394,75 +1453,44 @@ def _apply_upload_enhanced_conversions_for_leads(
     distinct = sorted({r["conversion_name"] for r in rows})
     action_resources = _resolve_upload_clicks_action(client, cid, distinct)
     consent = changes.get("consent")
-
-    payload: list = []
-    for r in rows:
-        cc = client.get_type("ClickConversion")
-        cc.conversion_action = action_resources[r["conversion_name"]]
-        cc.conversion_date_time = r["conversion_time"]
-        cc.conversion_value = float(r["conversion_value"])
-        cc.currency_code = r["currency_code"]
-
-        # Order ID is Google's dedup key for ClickConversion. When set,
-        # re-uploading the same (conversion_action, order_id) is a no-op;
-        # without it, every upload counts as a fresh conversion.
-        if r.get("order_id"):
-            cc.order_id = r["order_id"]
-
-        _apply_consent(client, cc, consent)
-
-        # Build user_identifiers from the hashed PII. Google matches the
-        # hashed email/phone/name to logged-in users who clicked our ads.
-        if r["email_sha256"]:
-            uid = client.get_type("UserIdentifier")
-            uid.hashed_email = r["email_sha256"]
-            cc.user_identifiers.append(uid)
-        if r["phone_sha256"]:
-            uid = client.get_type("UserIdentifier")
-            uid.hashed_phone_number = r["phone_sha256"]
-            cc.user_identifiers.append(uid)
-        if r["first_name_sha256"] and r["last_name_sha256"]:
-            uid = client.get_type("UserIdentifier")
-            uid.address_info.hashed_first_name = r["first_name_sha256"]
-            uid.address_info.hashed_last_name = r["last_name_sha256"]
-            cc.user_identifiers.append(uid)
-
-        if not cc.user_identifiers:
-            continue
-        payload.append(cc)
-
     upload_service = client.get_service("ConversionUploadService")
-    response = upload_service.upload_click_conversions(
-        customer_id=cid,
-        conversions=payload,
-        partial_failure=bool(changes.get("partial_failure", True)),
-    )
 
-    results = list(response.results)
-    # The Google Ads API only populates the result row's ``conversion_action``
-    # for rows that actually matched and were accepted. Failed rows come back
-    # with empty conversion_action (and a corresponding partial_failure_error
-    # entry). Echoed user_identifiers are NOT a success signal — the API
-    # echoes them back for failed rows too — so key success off
-    # conversion_action being populated.
-    success_count = sum(
-        1 for r in results if getattr(r, "conversion_action", "")
-    )
-    failure_count = len(results) - success_count
+    def _send(chunk: list[dict]):
+        payload: list = []
+        for r in chunk:
+            cc = client.get_type("ClickConversion")
+            cc.conversion_action = action_resources[r["conversion_name"]]
+            cc.conversion_date_time = r["conversion_time"]
+            cc.conversion_value = float(r["conversion_value"])
+            cc.currency_code = r["currency_code"]
+            if r.get("order_id"):
+                cc.order_id = r["order_id"]
+            _apply_consent(client, cc, consent)
 
-    row_errors: list[dict] = []
-    partial = getattr(response, "partial_failure_error", None)
-    if partial and partial.message:
-        row_errors.append({
-            "type": "partial_failure",
-            "message": partial.message,
-            "code": getattr(partial, "code", None),
-        })
+            # Hashed identifiers only; Google matches them to logged-in users
+            # who clicked the ads. A row with no usable identifier never gets
+            # here — the draft reports those instead (see `skipped_rows`).
+            if r["email_sha256"]:
+                uid = client.get_type("UserIdentifier")
+                uid.hashed_email = r["email_sha256"]
+                cc.user_identifiers.append(uid)
+            if r["phone_sha256"]:
+                uid = client.get_type("UserIdentifier")
+                uid.hashed_phone_number = r["phone_sha256"]
+                cc.user_identifiers.append(uid)
+            if r["first_name_sha256"] and r["last_name_sha256"]:
+                uid = client.get_type("UserIdentifier")
+                uid.address_info.hashed_first_name = r["first_name_sha256"]
+                uid.address_info.hashed_last_name = r["last_name_sha256"]
+                cc.user_identifiers.append(uid)
+            payload.append(cc)
+        response = upload_service.upload_click_conversions(
+            customer_id=cid,
+            conversions=payload,
+            partial_failure=True,
+        )
+        return payload, response
 
-    return {
-        "uploaded_total": len(payload),
-        "success_count": success_count,
-        "failure_count": failure_count,
-        "conversion_actions_used": action_resources,
-        "row_errors": row_errors,
-    }
+    ledger = _upload_in_batches(rows, _send)
+    ledger["conversion_actions_used"] = action_resources
+    return ledger
