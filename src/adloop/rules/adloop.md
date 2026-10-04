@@ -116,6 +116,7 @@ These tools call both APIs internally and return unified results with computed `
 - **Custom HTML (`html`) is gated** by `gtm.allow_custom_html`: creating/editing one, or publishing a workspace that adds/changes one, is refused while it is off. Prefer a built-in template. Pausing or deleting an HTML tag is always allowed.
 - Always read before writing: `list_gtm_tags` / `list_gtm_triggers` for IDs, `get_gtm_workspace_diff` before publishing. Present the publish preview's `pending_changes` in full — the user is approving all of them, not just the ones AdLoop drafted.
 - Updates and deletes pin the entity fingerprint and publish pins the workspace state; if someone edits the container after the preview, apply refuses. Re-draft rather than retrying.
+- The dry run for a publish runs a Tag Manager quick preview, so compiler errors show up before a version exists. The apply result names the version it replaced (`previous_live_version_id`) — that is the rollback, and if publishing a created version failed, the error carries both ids.
 - Prefer pausing a tag (`draft_gtm_tag` with `paused=true`) over deleting it.
 
 ### Google Search Console Read Tools (all read-only)

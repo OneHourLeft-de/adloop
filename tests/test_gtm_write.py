@@ -49,6 +49,14 @@ class FakeGTM:
             },
             "newWorkspacePath": f"accounts/{ACCOUNT}/containers/{CONTAINER}/workspaces/13",
         }
+        # The version that is live before a publish (rollback target).
+        self.live_version: dict = {
+            "path": f"accounts/{ACCOUNT}/containers/{CONTAINER}/versions/41",
+            "containerVersionId": "41",
+            "name": "live before",
+        }
+        self.quick_preview_response: dict = {}
+        self.publish_error: str = ""
         self.calls: list[tuple] = []
 
     # chain -------------------------------------------------------------
@@ -72,7 +80,19 @@ class _Versions:
     def publish(self, path):
         def run():
             self.f.calls.append(("publish", path))
+            if self.f.publish_error:
+                raise RuntimeError(self.f.publish_error)
             return {"containerVersion": {"path": path}}
+        return _Req(run)
+
+    def live(self, parent):
+        def run():
+            self.f.calls.append(("live", parent))
+            if self.f.live_version is None:
+                raise RuntimeError("404 no live version")
+            # The documented shape: versions.live answers with a bare
+            # ContainerVersion, not with a containerVersion wrapper.
+            return copy.deepcopy(self.f.live_version)
         return _Req(run)
 
 
@@ -93,6 +113,12 @@ class _Workspaces:
         def run():
             self.f.calls.append(("create_version", path, body))
             return copy.deepcopy(self.f.create_version_response)
+        return _Req(run)
+
+    def quick_preview(self, path):
+        def run():
+            self.f.calls.append(("quick_preview", path))
+            return copy.deepcopy(self.f.quick_preview_response)
         return _Req(run)
 
     def tags(self):
@@ -638,9 +664,110 @@ class TestPublish:
         result = _apply(cfg, preview["plan_id"])
         assert result["result"]["published"] is True
         assert result["result"]["version_id"] == "42"
-        assert fake.calls[0][0] == "create_version"
-        assert fake.calls[0][2]["name"] == "Add GA4 event"
-        assert fake.calls[1][0] == "publish"
+        # Reads (the live-version lookup) may sit in between; only the order of
+        # the two mutations matters.
+        mutations = [c for c in fake.calls if c[0] in ("create_version", "publish")]
+        assert [c[0] for c in mutations] == ["create_version", "publish"]
+        assert mutations[0][2]["name"] == "Add GA4 event"
+
+    def test_publish_records_the_previous_live_version(self, tmp_path, fake):
+        """Rollback is one step: the result names the version that was live."""
+        from adloop.gtm.write import draft_publish_gtm_workspace
+
+        fake.status = {"workspaceChange": [_change("tag", "1", name="GA4", type="gaawe")]}
+        cfg = _config(tmp_path)
+        preview = draft_publish_gtm_workspace(cfg, **_ids())
+
+        assert preview["changes"]["previous_live_version_id"] == "41"
+        assert any("live version 41" in w for w in preview["warnings"])
+
+        result = _apply(cfg, preview["plan_id"])
+        assert result["result"]["previous_live_version_id"] == "41"
+        assert result["result"]["previous_live_version_name"] == "live before"
+
+    def test_a_container_without_a_live_version_still_publishes(
+        self, tmp_path, fake
+    ):
+        from adloop.gtm.write import draft_publish_gtm_workspace
+
+        fake.live_version = None
+        fake.status = {"workspaceChange": [_change("tag", "1", name="GA4", type="gaawe")]}
+        cfg = _config(tmp_path)
+        preview = draft_publish_gtm_workspace(cfg, **_ids())
+
+        assert preview["changes"]["previous_live_version_id"] is None
+        result = _apply(cfg, preview["plan_id"])
+        assert result["result"]["published"] is True
+        assert result["result"]["previous_live_version_id"] is None
+
+    def test_a_wrapped_live_version_is_still_read(self, tmp_path, fake):
+        """Defensive: if a response ever carries the version under
+        ``containerVersion``, the rollback id must not silently become None."""
+        from adloop.gtm.write import _live_version
+
+        fake.live_version = {
+            "containerVersion": {
+                "path": f"accounts/{ACCOUNT}/containers/{CONTAINER}/versions/40",
+                "containerVersionId": "40",
+                "name": "wrapped",
+            }
+        }
+
+        assert _live_version(fake, ACCOUNT, CONTAINER) == {
+            "version_id": "40",
+            "version_name": "wrapped",
+        }
+
+    def test_quick_preview_compiler_error_is_caught_in_the_dry_run(
+        self, tmp_path, fake
+    ):
+        """The dry run compiles the workspace, so broken code is found before a
+        version exists at all."""
+        from adloop.gtm.write import draft_publish_gtm_workspace
+
+        fake.status = {"workspaceChange": [_change("tag", "1", name="GA4", type="gaawe")]}
+        fake.quick_preview_response = {"compilerError": True}
+        cfg = _config(tmp_path)
+        preview = draft_publish_gtm_workspace(cfg, **_ids())
+
+        result = _apply(cfg, preview["plan_id"], dry_run=True)
+
+        assert result["status"] == "DRY_RUN_FAILED"
+        assert "quick preview reports compiler errors" in result["error"]
+        assert not any(c[0] == "create_version" for c in fake.calls)
+
+    def test_dry_run_reports_the_quick_preview_and_live_version(
+        self, tmp_path, fake
+    ):
+        from adloop.gtm.write import draft_publish_gtm_workspace
+
+        fake.status = {"workspaceChange": [_change("tag", "1", name="GA4", type="gaawe")]}
+        cfg = _config(tmp_path)
+        preview = draft_publish_gtm_workspace(cfg, **_ids())
+
+        result = _apply(cfg, preview["plan_id"], dry_run=True)
+
+        assert result["status"] == "DRY_RUN_SUCCESS"
+        assert result["checks"]["quick_preview"] == "compiles"
+        assert result["checks"]["previous_live_version_id"] == "41"
+        assert "quick preview" in result["note"]
+        assert not any(c[0] == "create_version" for c in fake.calls)
+
+    def test_a_failed_publish_names_the_version_it_created(self, tmp_path, fake):
+        """create_version succeeded, publish did not: the created version id has
+        to be in the error, or the work is lost."""
+        from adloop.gtm.write import draft_publish_gtm_workspace
+
+        fake.status = {"workspaceChange": [_change("tag", "1", name="GA4", type="gaawe")]}
+        fake.publish_error = "403 insufficient permissions"
+        cfg = _config(tmp_path)
+        preview = draft_publish_gtm_workspace(cfg, **_ids())
+
+        result = _apply(cfg, preview["plan_id"])
+
+        assert "created version 42" in result["error"]
+        assert "versions/42" in result["error"]
+        assert "live version is still 41" in result["error"]
 
     def test_workspace_changed_since_preview_refuses(self, tmp_path, fake):
         from adloop.gtm.write import draft_publish_gtm_workspace
@@ -652,7 +779,9 @@ class TestPublish:
 
         result = _apply(cfg, preview["plan_id"])
         assert "differ from what was previewed" in result["error"]
-        assert fake.calls == []
+        assert not [
+            c for c in fake.calls if c[0] in ("create_version", "publish")
+        ]
 
     def test_compiler_error_publishes_nothing(self, tmp_path, fake):
         from adloop.gtm.write import draft_publish_gtm_workspace
@@ -682,6 +811,7 @@ class TestConfirmAndApply:
         assert result["status"] == "DRY_RUN_SUCCESS"
         assert result["checks"]["fingerprint_unchanged"] is True
         assert "Google Tag Manager" in result["note"]
+        assert "nothing was changed live" in result["note"]
         assert fake.calls == []
 
     def test_dry_run_catches_stale_plan(self, tmp_path, fake):

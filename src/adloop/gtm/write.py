@@ -6,7 +6,8 @@ Same safety model as every other AdLoop write:
        and returns a PREVIEW — nothing is sent to Tag Manager.
     2. ``confirm_and_apply(plan_id, dry_run=true)`` runs :func:`preflight`:
        Tag Manager has no validate-only mode, so the dry run re-reads the
-       target and re-checks every gate.
+       target and re-checks every gate. For a publish it also runs a quick
+       preview (a POST that stores a preview version, publishes nothing).
     3. ``confirm_and_apply(plan_id, dry_run=false)`` runs :func:`apply_plan`.
 
 Three gates sit on top of that, all enforced here rather than advised:
@@ -132,6 +133,36 @@ def _workspaces(client):
 
 def _container_path(account_id: str, container_id: str) -> str:
     return f"accounts/{account_id}/containers/{container_id}"
+
+
+def _live_version(client, account_id: str, container_id: str) -> dict:
+    """The version that is live right now — the rollback target.
+
+    Best effort: a container that was never published has no live version, and
+    a missing live version must not stop a publish. If the call fails for any
+    other reason the surrounding read would have failed too.
+
+    ``accounts.containers.versions.live`` answers with a bare ``ContainerVersion``
+    (checked against the v2 discovery document and the REST reference) — not
+    with a ``containerVersion`` wrapper like ``create_version`` does. Both
+    shapes are accepted so a wrapper can never turn the rollback id into
+    ``None`` without anybody noticing.
+    """
+    try:
+        response = (
+            client.accounts()
+            .containers()
+            .versions()
+            .live(parent=_container_path(account_id, container_id))
+            .execute()
+        )
+    except Exception:  # noqa: BLE001 — bookkeeping, never a reason to abort
+        return {"version_id": None, "version_name": None}
+    version = response.get("containerVersion") or response
+    return {
+        "version_id": version.get("containerVersionId"),
+        "version_name": version.get("name"),
+    }
 
 
 def _resolve_workspace(
@@ -661,6 +692,9 @@ def draft_publish_gtm_workspace(
         "pending_changes": pending,
         "workspace_digest": _workspace_digest(status),
     }
+    live = _live_version(client, account_id, container_id)
+    changes["previous_live_version_id"] = live["version_id"]
+    changes["previous_live_version_name"] = live["version_name"]
     warnings = [
         f"Publishing sets all {len(pending)} pending change(s) in workspace "
         f"'{ws_name}' LIVE for every visitor — including changes made by "
@@ -668,6 +702,12 @@ def draft_publish_gtm_workspace(
         "If the workspace changes after this preview, apply refuses and you "
         "must draft the publish again.",
     ]
+    if live["version_id"]:
+        warnings.append(
+            f"This replaces live version {live['version_id']} "
+            f"('{live['version_name']}') — publishing that version again is "
+            "the rollback."
+        )
     if html:
         warnings.append(
             f"{len(html)} Custom HTML tag(s) will go live (allowed by "
@@ -737,7 +777,13 @@ def _check_gates(config: AdLoopConfig, plan: ChangePlan) -> None:
 
 
 def preflight(config: AdLoopConfig, plan: ChangePlan) -> dict:
-    """Re-read the target and re-check every gate; sends nothing."""
+    """Re-read the target and re-check every gate; nothing goes live.
+
+    The publish preflight additionally runs ``workspaces.quick_preview`` — a
+    POST that compiles the workspace and stores a preview version, so compiler
+    errors are caught before ``create_version`` runs. It publishes nothing and
+    changes no live tag.
+    """
     _check_gates(config, plan)
     client = _client(config)
     changes = plan.changes
@@ -751,8 +797,30 @@ def preflight(config: AdLoopConfig, plan: ChangePlan) -> dict:
             html = _custom_html_changes(status)
             if html and not config.gtm.allow_custom_html:
                 raise RuntimeError(_custom_html_refusal("publishing this workspace")["error"])
+            # Tag Manager has no validate-only mode, but quick_preview compiles
+            # the workspace and reports compiler errors — exactly what would
+            # make create_version produce a version that cannot be published.
+            # It creates a preview version; nothing goes live.
+            quick = (
+                _workspaces(client)
+                .quick_preview(path=_ws_path(changes))
+                .execute()
+            )
+            if quick.get("compilerError"):
+                raise RuntimeError(
+                    "Tag Manager's quick preview reports compiler errors in "
+                    "this workspace, so the publish would fail after a version "
+                    "was created. Nothing was versioned and nothing was "
+                    "published. Open the workspace in the GTM UI, fix the "
+                    "errors, and draft the publish again."
+                )
+            live = _live_version(
+                client, changes["account_id"], changes["container_id"]
+            )
             checks["pending_changes_unchanged"] = True
             checks["pending_change_count"] = len(changes["pending_changes"])
+            checks["quick_preview"] = "compiles"
+            checks["previous_live_version_id"] = live["version_id"]
         else:
             current = _check_fingerprint(
                 _entity_api(client, plan), _entity_path(plan),
@@ -827,6 +895,12 @@ def _apply(config: AdLoopConfig, plan: ChangePlan) -> dict:
 
     if op == "gtm_publish_workspace":
         _check_workspace_unchanged(client, plan)
+        # The live version at the moment of the publish, not at draft time: the
+        # rollback target must be what this publish actually replaces, and a
+        # failed publish has to say which version could not go live.
+        live_before = _live_version(
+            client, changes["account_id"], changes["container_id"]
+        )
         body = {"name": changes["version_name"]}
         if changes.get("version_notes"):
             body["notes"] = changes["version_notes"]
@@ -843,14 +917,29 @@ def _apply(config: AdLoopConfig, plan: ChangePlan) -> dict:
             raise RuntimeError(
                 "Tag Manager created no container version; nothing was published."
             )
-        client.accounts().containers().versions().publish(
-            path=version["path"]
-        ).execute()
+        try:
+            client.accounts().containers().versions().publish(
+                path=version["path"]
+            ).execute()
+        except Exception as exc:
+            # The version exists but is not live. Say which one, so it can be
+            # published from the UI instead of drafting the whole change again.
+            raise RuntimeError(
+                "Tag Manager created version "
+                f"{version.get('containerVersionId')} ({version['path']}) but "
+                f"publishing it failed: {exc} Nothing went live — the live "
+                f"version is still {live_before['version_id']} "
+                f"('{live_before['version_name']}'). Publish the created "
+                "version from the GTM UI (Versions → Publish) once the cause "
+                "is fixed, or draft the publish again."
+            ) from exc
         return {
             "published": True,
             "version_id": version.get("containerVersionId"),
             "version_name": version.get("name"),
             "new_workspace_path": created.get("newWorkspacePath"),
+            "previous_live_version_id": live_before["version_id"],
+            "previous_live_version_name": live_before["version_name"],
         }
 
     raise ValueError(f"Unknown GTM operation: {op}")

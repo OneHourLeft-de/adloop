@@ -2775,8 +2775,14 @@ def confirm_and_apply(
             response["checks"] = preflight_checks
             response["note"] = (
                 f"{platform_label} has no validate-only mode: the dry run "
-                "re-read the target and re-checked the safety caps; nothing "
-                "was sent."
+                "re-read the target and re-checked the safety gates; nothing "
+                "was changed live."
+                + (
+                    " The publish preflight ran a Tag Manager quick preview, "
+                    "which stores a preview version and publishes nothing."
+                    if is_gtm
+                    else ""
+                )
             )
         if validation is not None:
             response["checks"] = validation

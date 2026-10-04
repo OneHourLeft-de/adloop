@@ -174,7 +174,8 @@ Off by default. Set `gtm.write_enabled: true` in `~/.adloop/config.yaml` and res
 Safety gates specific to GTM:
 - **Custom HTML** runs arbitrary JavaScript on your site, so creating or editing an `html` tag — or publishing a workspace that adds or changes one — is refused unless `gtm.allow_custom_html: true` is also set. Pausing or deleting one is always allowed.
 - **No stale writes.** Updates and deletes pin the entity's fingerprint from the preview, and publish pins the workspace's pending changes; if someone edits the container in between, apply refuses and you re-draft.
-- Publishing stops on merge conflicts or GTM compiler errors, and `confirm_and_apply(dry_run=true)` re-checks all of the above against the live container without sending anything.
+- Publishing stops on merge conflicts or GTM compiler errors. The dry run runs a Tag Manager **quick preview** first (Tag Manager has no validate-only mode), so compiler errors surface before a version is even created. That preview is a POST and stores a preview version in the container — nothing is published and no live tag changes; the rest of the dry run only reads.
+- The publish result names the version it replaced (`previous_live_version_id`), so rolling back is one step: publish that version again in the GTM UI. If the version was created but publishing it failed, the error carries both the created version id and the still-live one.
 - Per-operation names for `safety.blocked_operations`: `gtm_create_tag`, `gtm_update_tag`, `gtm_delete_tag`, `gtm_create_trigger`, `gtm_update_trigger`, `gtm_delete_trigger`, `gtm_publish_workspace`.
 
 The Google account also needs **Edit** permission on the container (and **Publish** to publish) under Admin → User Management.
