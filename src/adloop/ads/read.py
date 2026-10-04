@@ -190,6 +190,7 @@ def get_ad_performance(
                     "ad_group": r.get("ad_group.name"),
                     "headlines": headlines,
                     "descriptions": descriptions,
+                    "final_urls": r.get("ad_group_ad.ad.final_urls") or [],
                 })
 
     single_ad_groups = [
@@ -205,7 +206,6 @@ def get_ad_performance(
             if k not in (
                 "ad_group_ad.ad.responsive_search_ad.headlines",
                 "ad_group_ad.ad.responsive_search_ad.descriptions",
-                "ad_group_ad.ad.final_urls",
             )
         }
         slim["headline_count"] = _asset_count(
@@ -228,6 +228,12 @@ def get_ad_performance(
             f"Google cannot rotate or optimize with a single creative."
         )
 
+    # Landing-page work needs every ad's URL, not just the top ten rows'.
+    landing_pages: dict[str, int] = {}
+    for r in rows:
+        for url in r.get("ad_group_ad.ad.final_urls") or []:
+            landing_pages[url] = landing_pages.get(url, 0) + 1
+
     top = [_slim(r) for r in rows[:10]]
     return {
         "compact": True,
@@ -237,9 +243,14 @@ def get_ad_performance(
         "ads_top_spend": top,
         "incomplete_rsas": incomplete_rsas[:10],
         "single_ad_ad_groups": single_ad_groups[:10],
+        "landing_pages": [
+            {"final_url": url, "ads": count}
+            for url, count in sorted(landing_pages.items(), key=lambda item: -item[1])
+        ],
         "insights": insights,
         "note": _compact_note(len(top), len(rows), "get_ad_performance")
-        + " Compact rows replace full headline/description lists with counts.",
+        + " Compact rows replace full headline/description lists with counts;"
+        " landing_pages lists every final URL across all ads.",
     }
 
 
@@ -480,6 +491,7 @@ def get_negative_keywords(
                campaign_criterion.criterion_id
         FROM campaign_criterion
         WHERE campaign_criterion.negative = TRUE
+          AND campaign_criterion.type = 'KEYWORD'
           AND campaign_criterion.status != 'REMOVED'
           {campaign_filter}
         ORDER BY campaign.name

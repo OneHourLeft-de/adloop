@@ -421,15 +421,10 @@ def health_check() -> dict:
     except ImportError:
         pass
 
-    try:
-        from adloop.ga4.reports import get_account_summaries as _ga4_test
-
-        result = _ga4_test(current_config())
-        status["ga4"] = "ok"
-        status["ga4_properties"] = result.get("total_properties", 0)
-    except Exception as e:
+    def _ga4_failed(surface: str, e: Exception) -> None:
         parsed = _structured_error("health_check", e)
         status["ga4"] = "error"
+        status[surface] = "error"
         status["ga4_error"] = parsed["error"]
         if "hint" in parsed:
             status["ga4_hint"] = parsed["hint"]
@@ -437,6 +432,32 @@ def health_check() -> dict:
             status["ga4_auth_error"] = parsed["auth_error"]
         if "details" in parsed:
             status["ga4_error_details"] = parsed["details"]
+
+    # Two surfaces: the Admin API lists properties, the Data API serves every
+    # report. A project can have one enabled and not the other, so "ok" means
+    # both answered.
+    try:
+        from adloop.ga4.reports import get_account_summaries as _ga4_test
+
+        result = _ga4_test(current_config())
+        status["ga4_admin"] = "ok"
+        status["ga4_properties"] = result.get("total_properties", 0)
+    except Exception as e:
+        _ga4_failed("ga4_admin", e)
+    else:
+        from adloop.ga4.reports import first_property, probe_data_api
+
+        prop = current_config().ga4.property_id or first_property(result)
+        if not prop:
+            status["ga4"] = "ok"
+            status["ga4_data"] = "not_checked"
+        else:
+            try:
+                probe_data_api(current_config(), prop)
+                status["ga4"] = "ok"
+                status["ga4_data"] = "ok"
+            except Exception as e:
+                _ga4_failed("ga4_data", e)
 
     try:
         from adloop.ads.gaql import execute_query

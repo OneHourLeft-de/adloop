@@ -36,6 +36,27 @@ def get_account_summaries(config: AdLoopConfig) -> dict:
     }
 
 
+def first_property(summaries: dict) -> str:
+    """The first property in a get_account_summaries() result, or ""."""
+    for account in summaries.get("accounts", []):
+        for prop in account.get("properties", []):
+            if prop.get("property"):
+                return prop["property"]
+    return ""
+
+
+def probe_data_api(config: AdLoopConfig, property_name: str) -> None:
+    """Raise if the GA4 Data API cannot serve this property.
+
+    A metadata lookup is the cheapest Data API call: it touches no report
+    quota, yet fails with SERVICE_DISABLED exactly when every report would.
+    """
+    from adloop.ga4.client import get_data_client
+
+    name = property_name if property_name.startswith("properties/") else f"properties/{property_name}"
+    get_data_client(config).get_metadata(name=f"{name}/metadata")
+
+
 def run_ga4_report(
     config: AdLoopConfig,
     *,

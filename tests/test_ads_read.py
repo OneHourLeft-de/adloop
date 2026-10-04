@@ -281,6 +281,54 @@ class TestAdPerformanceCompact:
         assert any("one enabled ad" in i for i in result["insights"])
 
 
+class TestCompactKeepsLandingPages:
+    """Issue #63: landing-page work needs the URLs compact mode used to drop."""
+
+    def test_compact_rows_and_summary_carry_final_urls(self, config, monkeypatch):
+        def ad(ad_id, url, headlines=10):
+            return {
+                "ad_group.id": "g1",
+                "ad_group.name": "AG",
+                "ad_group_ad.ad.id": ad_id,
+                "ad_group_ad.ad.type": "RESPONSIVE_SEARCH_AD",
+                "ad_group_ad.status": "ENABLED",
+                "ad_group_ad.ad.responsive_search_ad.headlines": [{"text": "H"}] * headlines,
+                "ad_group_ad.ad.responsive_search_ad.descriptions": [{"text": "D"}] * 4,
+                "ad_group_ad.ad.final_urls": [url],
+                "metrics.cost_micros": 1_000_000,
+            }
+
+        rows = [ad(1, "https://a.example/"), ad(2, "https://a.example/"), ad(3, "https://b.example/", 4)]
+        _patch_rows(monkeypatch, rows)
+
+        result = read.get_ad_performance(config, customer_id="123", compact=True)
+
+        assert result["ads_top_spend"][0]["ad_group_ad.ad.final_urls"] == ["https://a.example/"]
+        assert result["incomplete_rsas"][0]["final_urls"] == ["https://b.example/"]
+        assert result["landing_pages"] == [
+            {"final_url": "https://a.example/", "ads": 2},
+            {"final_url": "https://b.example/", "ads": 1},
+        ]
+
+
+class TestNegativeKeywordsAreKeywordsOnly:
+    """Issue #61: other negative campaign criteria came back as blank rows."""
+
+    def test_query_filters_to_keyword_criteria(self, config, monkeypatch):
+        import adloop.ads.gaql as gaql
+
+        seen = {}
+
+        def capture(_config, _customer_id, query):
+            seen["query"] = query
+            return []
+
+        monkeypatch.setattr(gaql, "execute_query", capture)
+        read.get_negative_keywords(config, customer_id="123")
+
+        assert "campaign_criterion.type = 'KEYWORD'" in seen["query"]
+
+
 class TestCompactTotalsDisclosure:
     def test_search_term_totals_declare_themselves_partial_at_the_limit(
         self, config, monkeypatch
