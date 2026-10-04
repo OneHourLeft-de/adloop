@@ -2623,9 +2623,9 @@ def confirm_and_apply(
 
     is_reddit = plan.operation.startswith("reddit_")
     platform_label = "Reddit Ads" if is_reddit else "Google Ads"
-    # Upload plans carry PII (raw caller ids); the audit log gets a redacted copy.
-    # ``plan.changes`` is the summary a preview may show; the upload rows that
-    # carry raw PII live in ``plan.apply_only_payload`` and never reach here.
+    # ``plan.changes`` is the summary a preview may show; upload rows carry raw
+    # PII in ``plan.apply_only_payload``, which never reaches the audit log or
+    # a dry-run response.
 
     if dry_run:
         preflight_checks: dict | None = None

@@ -3507,11 +3507,19 @@ def draft_upload_call_conversions(
     caller's phone number. The CSV must have columns: Caller's Phone Number,
     Call Start Time, Conversion Name, Conversion Time, Conversion Value,
     Conversion Currency. The Conversion Name must match an existing
-    UPLOAD_CALLS-type conversion action exactly.
+    UPLOAD_CALLS-type conversion action — verified against the account while
+    drafting, so a typo fails here rather than after the upload.
+
+    Local file only: on the hosted server this tool refuses, because it would
+    read a path on the server rather than the caller's machine.
 
     PII: the caller phone number is required RAW by Google (it cannot be
-    hashed) — it is redacted in the preview and audit log but stored in the
-    plan so apply uploads exactly what you previewed (no CSV re-read).
+    hashed), so it lives in the plan's apply-only payload — the preview shows
+    redacted ids and counts, the audit log and `plan.changes` show neither.
+    Apply uploads exactly what you previewed (no CSV re-read).
+
+    Rows without a usable E.164 caller id are skipped and reported in
+    `skipped_rows` instead of being uploaded to no effect.
 
     consent (GDPR/EEA): {"ad_user_data": "GRANTED"|"DENIED"|"UNSPECIFIED",
     "ad_personalization": ...}. Defaults to UNSPECIFIED. Call

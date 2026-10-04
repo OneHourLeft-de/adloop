@@ -568,10 +568,10 @@ def _apply_remove_conversion_action(client: object, cid: str, changes: dict) -> 
 #
 #   1. Call conversions (UploadCallConversions) — matches phone calls back to
 #      ad clicks by caller_id (E.164 phone). The caller_id is REQUIRED raw by
-#      Google for matching and CANNOT be hashed. It is stored in the plan so
-#      apply can rebuild the upload without re-reading the CSV, but it is
-#      REDACTED in the audit log and preview display (see _redact_caller_id
-#      and _redact_changes_for_audit in write.py).
+#      Google for matching and CANNOT be hashed. It lives in the plan's
+#      apply-only payload so apply can rebuild the upload without re-reading
+#      the CSV, and the preview/audit surfaces never see it — the summary they
+#      show carries redacted ids only (see _redact_caller_id).
 #
 #   2. Enhanced Conversions for Leads (UploadClickConversions with
 #      user_identifiers) — matches hashed PII (email / phone / name) back to
@@ -882,10 +882,13 @@ def draft_upload_call_conversions(
     ``Parameters:TimeZone=...`` row at the top is ignored.
 
     The ``Conversion Name`` value MUST exactly match an existing conversion
-    action whose type is UPLOAD_CALLS.
+    action whose type is UPLOAD_CALLS — checked against the account here, so a
+    typo fails the preview rather than the upload.
 
-    Partial failure is always on: Google requires it for uploads, and dropping
-    the whole request because one row is malformed would hide the good rows.
+    Rows whose ``caller_id`` is empty or not E.164 are skipped and listed in
+    ``skipped_rows``; they could never match. Batches of 2,000 rows are sent
+    one request at a time, with partial failure always on (Google requires it),
+    and the result carries a per-batch ledger.
 
     ``consent`` (GDPR/EEA): a dict like
     ``{"ad_user_data": "GRANTED", "ad_personalization": "DENIED"}``. Values:
@@ -893,8 +896,10 @@ def draft_upload_call_conversions(
     UNSPECIFIED when omitted.
 
     PII note: the caller phone number is required raw by Google for matching,
-    so it is stored in the plan (needed by apply) but REDACTED in the preview
-    and the audit log. Call confirm_and_apply with the returned plan_id.
+    so the rows live in the plan's ``apply_only_payload`` — apply needs them,
+    and neither the preview, the dry-run response nor the audit log ever see
+    them. The preview shows counts and redacted sample rows. Call
+    confirm_and_apply with the returned plan_id.
     """
     from adloop.runtime import deployment_mode
     from adloop.safety.guards import SafetyViolation, check_blocked_operation
@@ -1316,7 +1321,7 @@ def _parse_ec_for_leads_csv(csv_path: str) -> tuple[list[dict], list[str]]:
     return out, errors
 
 
-def match_warnings(
+def _match_warnings(
     with_address: int,
     unusable_phones: list[int],
     name_only: list[int],
@@ -1369,8 +1374,10 @@ def draft_upload_enhanced_conversions_for_leads(
     retroactively — no "action must exist before the call" constraint like
     UPLOAD_CALLS has.
 
-    Optional ``Order ID`` CSV column → ClickConversion.order_id, Google's
-    dedup key; without it, re-uploads double-count matched conversions.
+    Optional columns: ``Order ID`` (Google's dedup key for ClickConversion —
+    without it, re-uploads double-count matched conversions), ``Country Code``
+    and ``Postal Code`` (sent plain in the address identifier — Enhanced
+    Conversions for Leads matches name-based rows far better with them).
 
     ``consent`` (GDPR/EEA): a dict like
     ``{"ad_user_data": "GRANTED", "ad_personalization": "DENIED"}``. Values:
@@ -1536,7 +1543,7 @@ def draft_upload_enhanced_conversions_for_leads(
             "consent": consent_norm,
             "parse_warnings": parse_errors,
             "dedup_warnings": dedup_warnings,
-            "match_warnings": match_warnings(
+            "match_warnings": _match_warnings(
                 with_address, unusable_phones, name_only
             ),
             "sample_rows": [
