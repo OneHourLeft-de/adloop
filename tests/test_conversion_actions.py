@@ -1636,3 +1636,73 @@ class TestUploadToolRegistration:
             }
 
         assert seen == [("call", "1234567890", 2), ("ec", "1234567890", 2)]
+
+
+class TestCsvInputHardening:
+    """The upload CSV is a local file; on a hosted runtime it must not be read."""
+
+    def _write(self, tmp_path, body: str, name: str = "upload.csv"):
+        path = tmp_path / name
+        path.write_text(body, encoding="utf-8")
+        return str(path)
+
+    def test_server_mode_refuses_before_touching_the_filesystem(
+        self, config, tmp_path, monkeypatch
+    ):
+        from adloop.runtime import deployment_mode, set_deployment_mode
+
+        monkeypatch.setattr(
+            conversion_actions, "_read_upload_csv", lambda _p: (_ for _ in ()).throw(
+                AssertionError("no filesystem access in server mode")
+            )
+        )
+        set_deployment_mode("server")
+        try:
+            result = conversion_actions.draft_upload_call_conversions(
+                config, customer_id="1234567890",
+                csv_path=str(tmp_path / "missing.csv"),
+            )
+        finally:
+            set_deployment_mode("local")
+
+        assert "not available on the hosted server" in result["error"]
+
+    def test_errors_never_echo_the_file_content(self, tmp_path):
+        # A header the caller sent must not come back in the error text: on a
+        # hosted runtime that first line can be any readable file's first line.
+        path = self._write(tmp_path, "SECRET-COLUMN-NAME\n1,2,3\n")
+
+        rows, errors = conversion_actions._read_upload_csv(path)
+        assert rows                      # readable
+        _, errors = conversion_actions._column_map(rows[0], ["Expected A"])
+        assert errors and "SECRET-COLUMN-NAME" not in " ".join(errors)
+        assert "Expected A" in errors[0]
+
+    def test_non_csv_suffix_is_refused(self, tmp_path):
+        path = self._write(tmp_path, "a,b\n", name="upload.txt")
+        _, errors = conversion_actions._read_upload_csv(path)
+        assert "must be a .csv file" in errors[0]
+
+    def test_directory_is_refused(self, tmp_path):
+        _, errors = conversion_actions._read_upload_csv(str(tmp_path))
+        assert "not a regular file" in errors[0]
+
+    def test_oversized_file_is_refused_before_reading(self, tmp_path, monkeypatch):
+        path = self._write(tmp_path, "a,b\n")
+        monkeypatch.setattr(conversion_actions, "_MAX_CSV_BYTES", 2)
+        _, errors = conversion_actions._read_upload_csv(path)
+        assert "MB" in errors[0] and "2,000 rows" in errors[0]
+
+    def test_bom_and_comment_rows_are_tolerated(self, tmp_path):
+        body = (
+            "\ufeffParameters:TimeZone=Europe/Berlin\n"
+            "# comment\n"
+            + _EC_HEADER + "\n"
+            + "user@example.com,+15555550142,Test,User,My Action,"
+              "2026-03-01T12:00:00Z,200.00,USD\n"
+        )
+        rows, errors = conversion_actions._parse_ec_for_leads_csv(
+            self._write(tmp_path, body)
+        )
+        assert errors == []
+        assert len(rows) == 1

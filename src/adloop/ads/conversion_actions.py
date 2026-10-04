@@ -739,79 +739,118 @@ def _normalize_call_timestamp(ts: str) -> str:
     return s
 
 
-def _parse_call_conversion_csv(csv_path: str) -> tuple[list[dict], list[str]]:
-    """Read the AdLoop-generated phone-conversions CSV.
+# Google's own upload templates start with a "Parameters:TimeZone=..." row and
+# use "#" for comments; both are skipped for every upload CSV.
+_CSV_SKIP_PREFIXES = ("Parameters:", "#")
 
-    Returns (rows, errors). Rows are dicts keyed by canonical column name.
-    Skips the optional `Parameters:TimeZone=...` row at the top.
+# A 2,000-row upload — the API's per-request cap — is well under 1 MB. The cap
+# only stops a stray multi-gigabyte path from being read into memory; it is not
+# a row limit.
+_MAX_CSV_BYTES = 5 * 1024 * 1024
 
-    The ``caller_id`` (E.164 phone) is retained RAW — Google requires it for
-    call-to-click matching and it cannot be hashed. Callers that persist
-    these rows (the draft path does, into the plan) are responsible for
-    redacting caller_id from any audit log or preview surface.
+
+def _read_upload_csv(csv_path: str) -> tuple[list[list[str]], list[str]]:
+    """Read an upload CSV into rows (header first); returns ``(rows, errors)``.
+
+    Local-only by design: the path is read from the machine running AdLoop, so
+    the tool refuses in server mode before it gets here. Errors name the file
+    and the schema, never file *content* — a hosted runtime can read files the
+    caller is not allowed to see.
     """
     import csv
     from pathlib import Path
 
-    errors: list[str] = []
     path = Path(csv_path).expanduser()
-    if not path.exists():
-        return [], [f"CSV not found at {path}"]
+    if not path.is_file():
+        return [], [f"CSV not found or not a regular file: {path}"]
+    if path.suffix.lower() != ".csv":
+        return [], [f"CSV must be a .csv file, got: {path.name}"]
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        return [], [f"CSV could not be read: {exc.strerror or exc}"]
+    if size > _MAX_CSV_BYTES:
+        return [], [
+            f"CSV is {size / 1_048_576:.1f} MB; the limit is "
+            f"{_MAX_CSV_BYTES // 1_048_576} MB. Split the file — Google accepts "
+            "at most 2,000 rows per upload request anyway."
+        ]
 
-    with path.open("r", newline="") as f:
-        reader = csv.reader(f)
-        rows_iter = iter(reader)
-        header: list[str] | None = None
-        for raw in rows_iter:
-            if not raw:
-                continue
-            first = (raw[0] or "").strip()
-            if first.startswith(("Parameters:", "#", "###")):
-                continue
-            header = [c.strip() for c in raw]
-            break
-        if header is None:
-            return [], ["CSV is empty (no header row found)"]
+    try:
+        with path.open("r", newline="", encoding="utf-8-sig") as handle:
+            rows = [
+                row
+                for row in csv.reader(handle)
+                if row
+                # Only fully blank rows are blank: a row whose *first* cell is
+                # empty (e.g. a lead without an email) is real data.
+                and any((cell or "").strip() for cell in row)
+                and not (row[0] or "").strip().startswith(_CSV_SKIP_PREFIXES)
+            ]
+    except OSError as exc:
+        return [], [f"CSV could not be read: {exc.strerror or exc}"]
+    except UnicodeDecodeError:
+        return [], ["CSV is not valid UTF-8."]
 
-        missing = [c for c in _EXPECTED_CALL_HEADERS if c not in header]
-        if missing:
-            errors.append(
-                f"CSV missing required columns: {missing}. Got: {header}"
-            )
-            return [], errors
-
-        col = {name: header.index(name) for name in _EXPECTED_CALL_HEADERS}
-        out: list[dict] = []
-        for line_num, raw in enumerate(rows_iter, start=2):
-            if not raw or all((c or "").strip() == "" for c in raw):
-                continue
-            if (raw[0] or "").strip().startswith(("#", "Parameters:")):
-                continue
-            try:
-                value_str = raw[col["Conversion Value"]].strip()
-                value = float(value_str) if value_str else 0.0
-            except (ValueError, IndexError):
-                errors.append(f"Row {line_num}: invalid Conversion Value")
-                continue
-            out.append({
-                "caller_id": _normalize_phone_e164(
-                    raw[col["Caller's Phone Number"]]
-                ),
-                "call_start_time": _normalize_call_timestamp(
-                    raw[col["Call Start Time"]]
-                ),
-                "conversion_name": raw[col["Conversion Name"]].strip(),
-                "conversion_time": _normalize_call_timestamp(
-                    raw[col["Conversion Time"]]
-                ),
-                "conversion_value": value,
-                "currency_code": (
-                    raw[col["Conversion Currency"]].strip().upper() or "USD"
-                ),
-            })
-        return out, errors
+    if not rows:
+        return [], ["CSV is empty (no header row found)"]
+    return rows, []
 
 
+def _column_map(
+    header: list[str], expected: list[str]
+) -> tuple[dict[str, int], list[str]]:
+    """Map required column names to indexes; report what is missing.
+
+    The expected list is our own schema text, so it is safe in an error — the
+    header the caller actually sent is not (it is file content).
+    """
+    columns = [cell.strip() for cell in header]
+    missing = [name for name in expected if name not in columns]
+    if missing:
+        return {}, [
+            f"CSV is missing required column(s): {', '.join(missing)}. "
+            f"Expected columns: {', '.join(expected)}"
+        ]
+    return {name: columns.index(name) for name in expected}, []
+
+
+def _parse_call_conversion_csv(csv_path: str) -> tuple[list[dict], list[str]]:
+    """Read the call-conversions CSV (local file) and normalize each row.
+
+    Returns (rows, errors). Rows are dicts keyed by canonical column name; the
+    optional ``Parameters:TimeZone=...`` row at the top is skipped, as are
+    comment lines.
+
+    The ``caller_id`` (E.164 phone) is retained RAW — Google requires it for
+    call-to-click matching and it cannot be hashed. The draft stores it in
+    ``ChangePlan.apply_only_payload``, which no preview or audit surface shows.
+    """
+    rows, errors = _read_upload_csv(csv_path)
+    if errors:
+        return [], errors
+
+    col, errors = _column_map(rows[0], _EXPECTED_CALL_HEADERS)
+    if errors:
+        return [], errors
+
+    out: list[dict] = []
+    for row_num, raw in enumerate(rows[1:], start=1):
+        try:
+            value_str = raw[col["Conversion Value"]].strip()
+            value = float(value_str) if value_str else 0.0
+        except (ValueError, IndexError):
+            errors.append(f"Row {row_num}: invalid Conversion Value")
+            continue
+        out.append({
+            "caller_id": _normalize_phone_e164(raw[col["Caller's Phone Number"]]),
+            "call_start_time": _normalize_call_timestamp(raw[col["Call Start Time"]]),
+            "conversion_name": raw[col["Conversion Name"]].strip(),
+            "conversion_time": _normalize_call_timestamp(raw[col["Conversion Time"]]),
+            "conversion_value": value,
+            "currency_code": (raw[col["Conversion Currency"]].strip().upper() or "USD"),
+        })
+    return out, errors
 def _redact_caller_id(caller_id: str) -> str:
     """Mask an E.164 phone for display/logging: keep the leading digits and
     the last 4, star the middle. e.g. '+15555550142' -> '+155***0142'.
@@ -858,8 +897,18 @@ def draft_upload_call_conversions(
     so it is stored in the plan (needed by apply) but REDACTED in the preview
     and the audit log. Call confirm_and_apply with the returned plan_id.
     """
+    from adloop.runtime import deployment_mode
     from adloop.safety.guards import SafetyViolation, check_blocked_operation
     from adloop.safety.preview import ChangePlan, store_plan
+
+    if deployment_mode() == "server":
+        return {
+            "error": (
+                "This tool uploads conversions from a CSV file on the machine "
+                "running AdLoop and is not available on the hosted server. "
+                "Use the self-hosted AdLoop MCP server for conversion uploads."
+            )
+        }
 
     try:
         check_blocked_operation("upload_call_conversions", config.safety)
@@ -1079,7 +1128,7 @@ _OPTIONAL_EC_HEADERS = [
 
 
 def _parse_ec_for_leads_csv(csv_path: str) -> tuple[list[dict], list[str]]:
-    """Parse the EC-for-Leads CSV and hash PII at parse time.
+    """Parse the EC-for-Leads CSV (local file) and hash PII at parse time.
 
     Required columns: Email, Phone Number, First Name, Last Name,
     Conversion Name, Conversion Time, Conversion Value, Conversion Currency.
@@ -1092,75 +1141,51 @@ def _parse_ec_for_leads_csv(csv_path: str) -> tuple[list[dict], list[str]]:
     hashes (``*_sha256`` keys) plus non-PII fields — the raw values never
     leave this function.
     """
-    import csv
-    from pathlib import Path
+    rows, errors = _read_upload_csv(csv_path)
+    if errors:
+        return [], errors
 
-    errors: list[str] = []
-    path = Path(csv_path).expanduser()
-    if not path.exists():
-        return [], [f"CSV not found at {path}"]
+    col, errors = _column_map(rows[0], _EXPECTED_EC_HEADERS)
+    if errors:
+        return [], errors
+    header = [cell.strip() for cell in rows[0]]
+    optional_col = {n: header.index(n) for n in _OPTIONAL_EC_HEADERS if n in header}
 
-    with path.open("r", newline="") as f:
-        reader = csv.reader(f)
-        rows_iter = iter(reader)
-        header: list[str] | None = None
-        for raw in rows_iter:
-            if not raw:
-                continue
-            first = (raw[0] or "").strip()
-            if first.startswith(("Parameters:", "#")):
-                continue
-            header = [c.strip() for c in raw]
-            break
-        if header is None:
-            return [], ["CSV is empty"]
-
-        missing = [c for c in _EXPECTED_EC_HEADERS if c not in header]
-        if missing:
-            return [], [
-                f"CSV missing required columns: {missing}. Got: {header}"
-            ]
-        col = {n: header.index(n) for n in _EXPECTED_EC_HEADERS}
-        optional_col = {
-            n: header.index(n) for n in _OPTIONAL_EC_HEADERS if n in header
-        }
-        out: list[dict] = []
-        for line_num, raw in enumerate(rows_iter, start=2):
-            if not raw or all((c or "").strip() == "" for c in raw):
-                continue
+    out: list[dict] = []
+    for row_num, raw in enumerate(rows[1:], start=1):
+        try:
+            value_str = raw[col["Conversion Value"]].strip()
+            value = float(value_str) if value_str else 0.0
+        except (ValueError, IndexError):
+            errors.append(f"Row {row_num}: invalid Conversion Value")
+            continue
+        order_id = ""
+        if "Order ID" in optional_col:
             try:
-                value_str = raw[col["Conversion Value"]].strip()
-                value = float(value_str) if value_str else 0.0
-            except (ValueError, IndexError):
-                errors.append(f"Row {line_num}: invalid Conversion Value")
-                continue
-            order_id = ""
-            if "Order ID" in optional_col:
-                try:
-                    order_id = raw[optional_col["Order ID"]].strip()
-                except IndexError:
-                    pass
-            # Normalize THEN hash. Raw values are discarded immediately.
-            email_norm = _normalize_email(raw[col["Email"]])
-            phone_norm = _normalize_phone_e164(raw[col["Phone Number"]])
-            first_norm = _normalize_name(raw[col["First Name"]])
-            last_norm = _normalize_name(raw[col["Last Name"]])
-            out.append({
-                "email_sha256": _sha256_hex(email_norm),
-                "phone_sha256": _sha256_hex(phone_norm),
-                "first_name_sha256": _sha256_hex(first_norm),
-                "last_name_sha256": _sha256_hex(last_norm),
-                "conversion_name": raw[col["Conversion Name"]].strip(),
-                "conversion_time": _normalize_call_timestamp(
-                    raw[col["Conversion Time"]]
-                ),
-                "conversion_value": value,
-                "currency_code": (
-                    raw[col["Conversion Currency"]].strip().upper() or "USD"
-                ),
-                "order_id": order_id,
-            })
-        return out, errors
+                order_id = raw[optional_col["Order ID"]].strip()
+            except IndexError:
+                pass
+        # Normalize THEN hash. Raw values are discarded immediately.
+        email_norm = _normalize_email(raw[col["Email"]])
+        phone_norm = _normalize_phone_e164(raw[col["Phone Number"]])
+        first_norm = _normalize_name(raw[col["First Name"]])
+        last_norm = _normalize_name(raw[col["Last Name"]])
+        out.append({
+            "email_sha256": _sha256_hex(email_norm),
+            "phone_sha256": _sha256_hex(phone_norm),
+            "first_name_sha256": _sha256_hex(first_norm),
+            "last_name_sha256": _sha256_hex(last_norm),
+            "conversion_name": raw[col["Conversion Name"]].strip(),
+            "conversion_time": _normalize_call_timestamp(
+                raw[col["Conversion Time"]]
+            ),
+            "conversion_value": value,
+            "currency_code": (
+                raw[col["Conversion Currency"]].strip().upper() or "USD"
+            ),
+            "order_id": order_id,
+        })
+    return out, errors
 
 
 def draft_upload_enhanced_conversions_for_leads(
@@ -1194,8 +1219,18 @@ def draft_upload_enhanced_conversions_for_leads(
 
     Call confirm_and_apply with the returned plan_id to execute.
     """
+    from adloop.runtime import deployment_mode
     from adloop.safety.guards import SafetyViolation, check_blocked_operation
     from adloop.safety.preview import ChangePlan, store_plan
+
+    if deployment_mode() == "server":
+        return {
+            "error": (
+                "This tool uploads conversions from a CSV file on the machine "
+                "running AdLoop and is not available on the hosted server. "
+                "Use the self-hosted AdLoop MCP server for conversion uploads."
+            )
+        }
 
     try:
         check_blocked_operation(
