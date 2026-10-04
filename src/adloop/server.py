@@ -718,7 +718,7 @@ def list_merchant_accounts() -> dict:
 
 @mcp.tool(title="Merchant Center feed health", annotations=_READONLY, tags={"merchant"})
 @_safe
-def get_merchant_feed_health(account_id: str) -> dict:
+def get_merchant_feed_health(account_id: str = "") -> dict:
     """Merchant Center feed health — disapproved products + account issues.
 
     Disapproved feed items silently starve Shopping and Performance Max
@@ -728,6 +728,7 @@ def get_merchant_feed_health(account_id: str) -> dict:
     account-level issues — CRITICAL ones stop offers serving entirely.
 
     account_id: numeric Merchant Center ID from list_merchant_accounts.
+        Defaults to merchant.account_id in the config.
     Product-status data lags reality by ~30 minutes.
     """
     from adloop.merchant.read import get_merchant_feed_health as _impl

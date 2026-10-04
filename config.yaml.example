@@ -54,6 +54,13 @@ gtm:
   account_id: ""
   container_id: ""
 
+merchant:
+  # Default Google Merchant Center account for get_merchant_feed_health.
+  # The numeric ID from list_merchant_accounts, or from the Merchant Center
+  # UI (top-right corner / in the URL). Leave empty to pass account_id as a
+  # parameter in each call instead.
+  account_id: ""
+
 pagespeed:
   # Optional Google API key for PageSpeed Insights (analyze_page_speed).
   # Works without one at very low rates; create a key in your GCP project

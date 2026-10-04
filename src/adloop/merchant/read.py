@@ -124,7 +124,19 @@ def get_merchant_feed_health(
         register_gcp,
     )
 
-    account_id = str(account_id or "").strip()
+    account_id = str(account_id or "").strip() or config.merchant.account_id.strip()
+    if not account_id:
+        return {
+            "error": (
+                "account_id is required: no Merchant Center account was "
+                "passed and no default is configured."
+            ),
+            "hint": (
+                "Call list_merchant_accounts to find the numeric Merchant "
+                "Center ID and pass it as account_id, or set "
+                "merchant.account_id in the config to make it the default."
+            ),
+        }
     if not account_id.isdigit():
         return {
             "error": "account_id must be a numeric Merchant Center ID — "

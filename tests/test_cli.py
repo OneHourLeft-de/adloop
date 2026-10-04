@@ -123,11 +123,13 @@ class TestGenerateConfigYamlOptionalServices:
             gsc_site_url="sc-domain:example.com",
             gtm_account_id="6001",
             gtm_container_id="7001",
+            merchant_account_id="5551234",
             pagespeed_api_key="AIzaKey",
         )
         parsed = yaml.safe_load(content)
         assert parsed["gsc"]["site_url"] == "sc-domain:example.com"
         assert parsed["gtm"] == {"account_id": "6001", "container_id": "7001"}
+        assert parsed["merchant"] == {"account_id": "5551234"}
         assert parsed["pagespeed"]["api_key"] == "AIzaKey"
 
     def test_optional_sections_default_to_empty_but_present(self):
@@ -146,6 +148,7 @@ class TestGenerateConfigYamlOptionalServices:
         # can fill them in later without guessing key names.
         assert parsed["gsc"]["site_url"] == ""
         assert parsed["gtm"]["container_id"] == ""
+        assert parsed["merchant"]["account_id"] == ""
         assert parsed["pagespeed"]["api_key"] == ""
         assert parsed["reddit"]["client_id"] == ""
         assert parsed["reddit"]["token_path"] == "~/.adloop/reddit_token.json"

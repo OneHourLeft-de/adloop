@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from adloop.config import AdLoopConfig
+from adloop.config import AdLoopConfig, MerchantConfig
 from adloop.merchant import client, read
 
 
@@ -93,6 +93,41 @@ class TestFeedHealth:
     def test_requires_numeric_account_id(self, config):
         result = read.get_merchant_feed_health(config, account_id="my-shop")
         assert "numeric" in result["error"]
+
+    def test_configured_default_is_used_when_no_account_id_passed(self):
+        config = AdLoopConfig(merchant=MerchantConfig(account_id="111"))
+        calls, patcher = _patch_get(self._responses())
+        with patcher:
+            result = read.get_merchant_feed_health(config)
+
+        assert result["account_id"] == "111"
+        assert [c[0] for c in calls] == [
+            "accounts/111/aggregateProductStatuses",
+            "accounts/111/issues",
+        ]
+
+    def test_explicit_account_id_beats_the_configured_default(self):
+        config = AdLoopConfig(merchant=MerchantConfig(account_id="111"))
+        calls, patcher = _patch_get(self._responses())
+        with patcher:
+            result = read.get_merchant_feed_health(config, account_id="222")
+
+        assert result["account_id"] == "222"
+        assert all(c[0].startswith("accounts/222/") for c in calls)
+
+    def test_configured_default_is_still_validated_as_numeric(self):
+        config = AdLoopConfig(merchant=MerchantConfig(account_id="my-shop"))
+        result = read.get_merchant_feed_health(config)
+        assert "numeric" in result["error"]
+
+    def test_neither_argument_nor_default_returns_guided_error(self, config):
+        with patch("adloop.merchant.client.merchant_get") as fake_get:
+            result = read.get_merchant_feed_health(config)
+
+        fake_get.assert_not_called()
+        assert "account_id is required" in result["error"]
+        assert "list_merchant_accounts" in result["hint"]
+        assert "merchant.account_id" in result["hint"]
 
     def test_summarizes_disapprovals_and_ranks_issues(self, config):
         calls, patcher = _patch_get(self._responses())
@@ -368,3 +403,27 @@ class TestSubApiRouting:
                    return_value=object()):
             with pytest.raises(RuntimeError, match=r"404 for .*/accounts/v1/accounts/111/issues"):
                 client.merchant_get(config, "accounts/111/issues")
+
+
+class TestFeedHealthTool:
+    @pytest.mark.asyncio
+    async def test_tool_account_id_is_optional_and_uses_runtime_default(self):
+        from adloop import runtime
+        from adloop.server import mcp
+
+        tool = await mcp.get_tool("get_merchant_feed_health")
+        assert "account_id" not in (tool.parameters.get("required") or [])
+
+        runtime.set_default_config(
+            AdLoopConfig(merchant=MerchantConfig(account_id="333"))
+        )
+        try:
+            with patch(
+                "adloop.merchant.client.merchant_get", return_value={}
+            ) as fake_get:
+                result = tool.fn()
+        finally:
+            runtime.set_default_config(None)
+
+        assert result["account_id"] == "333"
+        assert fake_get.call_args_list[0].args[1].startswith("accounts/333/")

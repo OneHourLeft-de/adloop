@@ -26,6 +26,18 @@ class TestLoadConfig:
         assert config.safety.two_phase_apply is True
         assert config.ads.customer_id == "123-456-7890"
 
+    def test_loads_merchant_default_account(self, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("merchant:\n  account_id: 1234567\n")
+        config = load_config(str(config_file))
+        assert config.merchant.account_id == "1234567"
+
+    def test_merchant_account_defaults_empty(self, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("merchant:\n")
+        assert load_config(str(config_file)).merchant.account_id == ""
+        assert AdLoopConfig().merchant.account_id == ""
+
     def test_two_phase_apply_defaults_off(self, tmp_path):
         config = load_config(str(tmp_path / "nonexistent.yaml"))
         assert config.safety.two_phase_apply is False

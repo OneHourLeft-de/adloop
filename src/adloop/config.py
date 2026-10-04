@@ -44,6 +44,11 @@ class GtmConfig:
 
 
 @dataclass
+class MerchantConfig:
+    account_id: str = ""  # numeric Merchant Center ID (see list_merchant_accounts)
+
+
+@dataclass
 class PageSpeedConfig:
     api_key: str = ""  # optional — keyless PSI calls work but are rate-limited
 
@@ -85,6 +90,7 @@ class AdLoopConfig:
     ads: AdsConfig = field(default_factory=AdsConfig)
     gsc: GscConfig = field(default_factory=GscConfig)
     gtm: GtmConfig = field(default_factory=GtmConfig)
+    merchant: MerchantConfig = field(default_factory=MerchantConfig)
     pagespeed: PageSpeedConfig = field(default_factory=PageSpeedConfig)
     reddit: RedditConfig = field(default_factory=RedditConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
@@ -144,6 +150,7 @@ def load_config(config_path: str | None = None) -> AdLoopConfig:
     ads_raw = raw.get("ads", {})
     gsc_raw = raw.get("gsc", {})
     gtm_raw = raw.get("gtm", {})
+    merchant_raw = raw.get("merchant", {}) or {}
     pagespeed_raw = raw.get("pagespeed", {})
     reddit_raw = raw.get("reddit", {}) or {}
     safety_raw = raw.get("safety", {})
@@ -168,6 +175,9 @@ def load_config(config_path: str | None = None) -> AdLoopConfig:
         gtm=GtmConfig(
             account_id=_text(gtm_raw, "account_id"),
             container_id=_text(gtm_raw, "container_id"),
+        ),
+        merchant=MerchantConfig(
+            account_id=_text(merchant_raw, "account_id"),
         ),
         pagespeed=PageSpeedConfig(
             api_key=_text(pagespeed_raw, "api_key"),

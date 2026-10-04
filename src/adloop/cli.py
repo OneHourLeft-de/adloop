@@ -156,6 +156,7 @@ def _generate_config_yaml(
     gsc_site_url: str = "",
     gtm_account_id: str = "",
     gtm_container_id: str = "",
+    merchant_account_id: str = "",
     pagespeed_api_key: str = "",
     reddit_client_id: str = "",
     reddit_client_secret: str = "",
@@ -205,6 +206,11 @@ def _generate_config_yaml(
         "  # Empty = pass gtm_account_id / gtm_container_id per call instead.",
         f'  account_id: "{gtm_account_id}"',
         f'  container_id: "{gtm_container_id}"',
+        "",
+        "merchant:",
+        "  # Default Merchant Center ID for get_merchant_feed_health",
+        "  # (see list_merchant_accounts). Empty = pass account_id per call.",
+        f'  account_id: "{merchant_account_id}"',
         "",
         "pagespeed:",
         "  # Optional API key for analyze_page_speed (keyless works, low quota).",
@@ -844,6 +850,9 @@ def _run_wizard_post_config(
         gsc_site_url=gsc_site_url,
         gtm_account_id=gtm_account_id,
         gtm_container_id=gtm_container_id,
+        # No Merchant discovery in the wizard; keep a hand-set default
+        # across re-runs instead of wiping it.
+        merchant_account_id=_existing("merchant", "account_id"),  # type: ignore[operator]
         pagespeed_api_key=pagespeed_api_key,
         reddit_client_id=reddit_values["client_id"],
         reddit_client_secret=reddit_values["client_secret"],
