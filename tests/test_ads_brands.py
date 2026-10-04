@@ -172,6 +172,50 @@ class TestCheckBrandNames:
         assert entry["brand"]["id"] == "brand-new"
         assert len(entry["candidates"]) == 2
 
+    def test_a_retired_brand_is_never_the_best_match(self, config, monkeypatch):
+        """Google suggests by prefix, so the dead candidate here is the exact
+        name — and it still must not win: a retired ID in a brand list is worse
+        than an imperfect name match."""
+        _patch_client(monkeypatch, [[
+            _suggestion("brand-old", "NoWayOut", state=7),
+            _suggestion("brand-new", "No Way Out München", state=2),
+        ]])
+
+        result = brands.check_brand_names(config, brand_names=["NoWayOut"])
+
+        entry = result["results"][0]
+        assert entry["status"] == "matched"
+        assert entry["brand"]["id"] == "brand-new"
+        assert entry["exact_match"] is False
+        assert [c["id"] for c in entry["candidates"]] == ["brand-old", "brand-new"]
+
+    def test_live_states_are_ordered_before_states_we_cannot_judge(
+        self, config, monkeypatch
+    ):
+        _patch_client(monkeypatch, [[
+            _suggestion("brand-unknown", "MysteryRooms", state=1),
+            _suggestion("brand-dead", "Mystery Rooms Berlin", state=6),
+            _suggestion("brand-live", "Mystery Rooms", state=4),
+        ]])
+
+        result = brands.check_brand_names(config, brand_names=["Mystery Rooms"])
+
+        entry = result["results"][0]
+        assert entry["brand"]["id"] == "brand-live"
+        assert entry["exact_match"] is True
+
+    def test_an_unknown_state_does_not_outrank_a_live_brand(self, config, monkeypatch):
+        """A state Google adds later is treated as unknown, never as better
+        than ENABLED."""
+        _patch_client(monkeypatch, [[
+            _suggestion("brand-new-state", "Unlock", state=99),
+            _suggestion("brand-live", "Unlock Escape", state=2),
+        ]])
+
+        result = brands.check_brand_names(config, brand_names=["Unlock Escape"])
+
+        assert result["results"][0]["brand"]["id"] == "brand-live"
+
     def test_duplicates_are_collapsed_and_blank_names_dropped(
         self, config, monkeypatch
     ):
@@ -827,3 +871,26 @@ class TestBrandListSafety:
         )
 
         assert result["requires_double_confirm"] is True
+class TestStateRanking:
+    """The tiers of ``_state_rank`` — pinned so a later edit cannot blur them."""
+
+    def test_enabled_customer_scoped_and_dead_are_three_tiers(self):
+        assert brands._state_rank("ENABLED") == 0
+        assert brands._state_rank("UNVERIFIED") == 0
+        assert brands._state_rank("APPROVED") == 0
+        for dead in ("DEPRECATED", "CANCELLED", "REJECTED"):
+            assert brands._state_rank(dead) == 1, dead
+        for unknown in ("UNSPECIFIED", "UNKNOWN", "SOMETHING_NEW"):
+            assert brands._state_rank(unknown) == 2, unknown
+
+    def test_a_customer_scoped_brand_can_still_win(self, config, monkeypatch):
+        """UNVERIFIED is targeting-capable, so it beats a retired brand."""
+        _patch_client(monkeypatch, [[
+            _suggestion("brand-dead", "Unlock Escape", state=3),
+            _suggestion("brand-scoped", "Unlock", state=4),
+        ]])
+
+        entry = brands.check_brand_names(config, brand_names=["Unlock"])["results"][0]
+
+        assert entry["brand"]["id"] == "brand-scoped"
+        assert entry["brand"]["state"] == "UNVERIFIED"
