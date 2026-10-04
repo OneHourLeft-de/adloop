@@ -975,7 +975,8 @@ def draft_upload_call_conversions(
         return {"error": str(e)}
 
     # Freeze the exact rows apply will upload (caller_id RAW — required by
-    # Google). These live in the plan; the audit path redacts caller_id.
+    # Google). They go into the plan's apply-only payload, which no preview or
+    # audit surface shows; the audit log gets the summary below.
     frozen_rows = [
         {
             "caller_id": r["caller_id"],

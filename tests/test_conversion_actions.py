@@ -766,12 +766,21 @@ class _FakeUploadService:
         self._fail_on_call = fail_on_call
 
     def upload_call_conversions(
-        self, *, customer_id, conversions, partial_failure
+        self, request=None, *, customer_id=None, conversions=None, partial_failure=None
     ):
+        # Two call shapes: the applier passes kwargs, the validate-only wrapper
+        # passes a built request. Both are recorded the same way.
+        validate_only = False
+        if request is not None:
+            customer_id = request.customer_id
+            conversions = list(request.conversions)
+            partial_failure = request.partial_failure
+            validate_only = bool(getattr(request, "validate_only", False))
         self.called_with = {
             "customer_id": customer_id,
-            "conversions": list(conversions),
+            "conversions": list(conversions or []),
             "partial_failure": partial_failure,
+            "validate_only": validate_only,
         }
         self.calls.append(dict(self.called_with))
         if self._fail_on_call and len(self.calls) == self._fail_on_call:
@@ -804,12 +813,19 @@ class _FakeClickUploadService:
         self._fail_on_call = fail_on_call
 
     def upload_click_conversions(
-        self, *, customer_id, conversions, partial_failure
+        self, request=None, *, customer_id=None, conversions=None, partial_failure=None
     ):
+        validate_only = False
+        if request is not None:
+            customer_id = request.customer_id
+            conversions = list(request.conversions)
+            partial_failure = request.partial_failure
+            validate_only = bool(getattr(request, "validate_only", False))
         self.called_with = {
             "customer_id": customer_id,
-            "conversions": list(conversions),
+            "conversions": list(conversions or []),
             "partial_failure": partial_failure,
+            "validate_only": validate_only,
         }
         self.calls.append(dict(self.called_with))
         if self._fail_on_call and len(self.calls) == self._fail_on_call:
@@ -929,7 +945,12 @@ class _EchoActionRows:
 
     def search(self, *, customer_id, query):
         self.queries.append(query)
-        names = [m.replace("''", "'") for m in re.findall(r"'((?:[^']|'')*)'", query)]
+        # Skip SQL literals such as the status filter, they are not names.
+        names = [
+            m.replace("''", "'")
+            for m in re.findall(r"'((?:[^']|'')*)'", query)
+            if m not in ("REMOVED", "ENABLED", "UPLOAD_CALLS", "UPLOAD_CLICKS")
+        ]
         return iter([
             _FakeSearchRow(
                 name, f"customers/1/conversionActions/{index}", type_name=self.type_name
@@ -2150,3 +2171,90 @@ class TestUploadFlowThroughConfirmAndApply:
         sent = client._services["ConversionUploadService"].calls[0]["conversions"]
         assert sent[0].caller_id == "+15555550142"
         assert "+15555550142" not in (tmp_path / "audit.log").read_text()
+
+
+class TestDryRunUsesValidateOnly:
+    """kLOsk's 0.16.1 fix: a dry run must reach Google with validate_only=True.
+
+    Before that fix the upload methods slipped past the wrapper (it only
+    intercepted ``mutate*``), so a "dry run" of this tool uploaded for real.
+    The suite-wide fixture replaces ``_validate_with_google`` with an offline
+    stub, so this class restores the real path for its own tests.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _real_validation(self, monkeypatch):
+        monkeypatch.setattr(
+            write,
+            "_validate_with_google",
+            lambda config, plan: write._execute_plan(config, plan, validate_only=True),
+        )
+
+    def _config(self, tmp_path):
+        # A log file inside tmp_path: the default would append to the
+        # developer's own ~/.adloop/audit.log.
+        return AdLoopConfig(
+            ads=AdsConfig(customer_id="123-456-7890"),
+            safety=SafetyConfig(
+                require_dry_run=True, log_file=str(tmp_path / "audit.log")
+            ),
+        )
+
+    def test_call_upload_dry_run_is_validate_only(self, tmp_path, monkeypatch):
+        config = self._config(tmp_path)
+        preview, client = self._call_draft(config, tmp_path, monkeypatch)
+
+    def _call_draft(self, config, tmp_path, monkeypatch):
+        client = _client_with(
+            upload_service=_FakeUploadService(results_count=1),
+            ads_service=_EchoActionRows("UPLOAD_CALLS"),
+        )
+        monkeypatch.setattr("adloop.ads.client.get_ads_client", lambda _cfg: client)
+        path = tmp_path / "phone.csv"
+        path.write_text(
+            _CALL_HEADER
+            + "+15555550142,2026-03-01T12:00:00Z,My Action,"
+              "2026-03-01T13:00:00Z,10,USD\n"
+        )
+        preview = conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+        return preview, client
+
+    def test_call_upload_dry_run_is_validate_only(self, config, tmp_path, monkeypatch):
+        preview, client = self._call_draft(config, tmp_path, monkeypatch)
+
+        result = write.confirm_and_apply(
+            config, plan_id=preview["plan_id"], dry_run=True
+        )
+
+        assert result["status"] == "DRY_RUN_SUCCESS", result
+        assert result["checks"] == {"validated_calls": 1, "skipped_calls": 0}, result
+        service = client._services["ConversionUploadService"]
+        assert len(service.calls) == 1
+        assert service.calls[0]["validate_only"] is True
+        assert len(service.calls[0]["conversions"]) == 1
+
+    def test_ec_upload_dry_run_is_validate_only(self, tmp_path, monkeypatch):
+        config = self._config(tmp_path)
+        upload = _FakeClickUploadService(results_count=1)
+        client = _client_with(
+            upload_service=upload, ads_service=_EchoActionRows("UPLOAD_CLICKS")
+        )
+        monkeypatch.setattr("adloop.ads.client.get_ads_client", lambda _cfg: client)
+        path = tmp_path / "leads.csv"
+        path.write_text(
+            _EC_HEADER + "\n"
+            + "user@example.com,+15555550142,Test,User,Job Close,"
+              "2026-03-01T12:00:00Z,500.00,USD\n"
+        )
+        preview = conversion_actions.draft_upload_enhanced_conversions_for_leads(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+
+        result = write.confirm_and_apply(
+            config, plan_id=preview["plan_id"], dry_run=True
+        )
+
+        assert result["status"] == "DRY_RUN_SUCCESS", result
+        assert upload.calls[0]["validate_only"] is True
