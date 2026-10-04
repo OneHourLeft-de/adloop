@@ -3660,6 +3660,12 @@ def suggest_brands(
 
     selected_brand_ids: IDs already picked, handed back so Google keeps them
     in the suggestion set while the prefix narrows. Optional.
+
+    Args:
+        brand_prefix: The brand name to look up, free text (e.g. "NoWayOut").
+        selected_brand_ids: Commercial Knowledge Graph MIDs already picked;
+            optional, Google keeps them in the suggestion set.
+        customer_id: Ads account ID. Defaults to the configured account.
     """
     from adloop.ads.brands import suggest_brands as _impl
 
@@ -3691,6 +3697,10 @@ def check_brand_names(
 
     At most 25 names per call — the API resolves one prefix per request, so
     split longer lists.
+
+    Args:
+        brand_names: The names to triage, at most 25 per call.
+        customer_id: Ads account ID. Defaults to the configured account.
     """
     from adloop.ads.brands import check_brand_names as _impl
 
