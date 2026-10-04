@@ -925,6 +925,33 @@ def draft_upload_call_conversions(
     if not rows:
         return {"error": "CSV contained zero conversion rows"}
 
+    # A call upload without a usable E.164 caller id cannot match anything —
+    # Google fails such a row. Report it here instead of uploading a no-op.
+    usable: list[dict] = []
+    skipped: list[dict] = []
+    for row_num, row in enumerate(rows, start=1):
+        caller = (row.get("caller_id") or "").strip()
+        if caller.startswith("+"):
+            usable.append(row)
+            continue
+        skipped.append({
+            "row": row_num,
+            "reason": (
+                "caller_id is empty"
+                if not caller
+                else "caller_id is not E.164 (no leading '+'); Google rejects "
+                "such rows"
+            ),
+        })
+    if not usable:
+        return {
+            "error": (
+                "No row carries a usable E.164 caller_id. Nothing was planned."
+            ),
+            "skipped_rows": skipped,
+        }
+    rows = usable
+
     distinct_actions = sorted({r["conversion_name"] for r in rows})
     total_value = sum(r["conversion_value"] for r in rows)
 
@@ -955,6 +982,8 @@ def draft_upload_call_conversions(
             "row_count": len(rows),
             "total_value": round(total_value, 2),
             "currency_hint": rows[0]["currency_code"] if rows else "USD",
+            "skipped_count": len(skipped),
+            "skipped_rows": skipped,
             "distinct_conversion_actions": distinct_actions,
             "partial_failure": True,
             "consent": consent_norm,
@@ -1181,6 +1210,11 @@ _EXPECTED_EC_HEADERS = [
 # double-count.
 _OPTIONAL_EC_HEADERS = [
     "Order ID",
+    # Enhanced Conversions for Leads matches name-only rows far better with an
+    # address than without: Google expects at least country + postal code next
+    # to hashed names. Both are plain values (the proto hashes only the names).
+    "Postal Code",
+    "Country Code",
 ]
 
 
@@ -1224,14 +1258,27 @@ def _parse_ec_for_leads_csv(csv_path: str) -> tuple[list[dict], list[str]]:
                 pass
         # Normalize THEN hash. Raw values are discarded immediately.
         email_norm = _normalize_email(raw[col["Email"]])
-        phone_norm = _normalize_phone_e164(raw[col["Phone Number"]])
+        raw_phone = raw[col["Phone Number"]]
+        phone_norm = _normalize_phone_e164(raw_phone)
+        # A phone that is not E.164 hashes to a value Google can never match —
+        # sending it would only pad the payload. Keep the row (email/address
+        # may still match) but drop the identifier and say so.
+        phone_usable = phone_norm.startswith("+")
         first_norm = _normalize_name(raw[col["First Name"]])
         last_norm = _normalize_name(raw[col["Last Name"]])
+
+        def _optional(name: str) -> str:
+            return raw[optional_col[name]].strip() if name in optional_col else ""
+
         out.append({
             "email_sha256": _sha256_hex(email_norm),
-            "phone_sha256": _sha256_hex(phone_norm),
+            "phone_sha256": _sha256_hex(phone_norm) if phone_usable else "",
+            "phone_was_given": bool((raw_phone or "").strip()),
+            "phone_usable": phone_usable,
             "first_name_sha256": _sha256_hex(first_norm),
             "last_name_sha256": _sha256_hex(last_norm),
+            "postal_code": _optional("Postal Code"),
+            "country_code": _optional("Country Code").upper(),
             "conversion_name": raw[col["Conversion Name"]].strip(),
             "conversion_time": _normalize_call_timestamp(
                 raw[col["Conversion Time"]]
@@ -1243,6 +1290,39 @@ def _parse_ec_for_leads_csv(csv_path: str) -> tuple[list[dict], list[str]]:
             "order_id": order_id,
         })
     return out, errors
+
+
+def match_warnings(
+    with_address: int,
+    unusable_phones: list[int],
+    name_only: list[int],
+) -> list[str]:
+    """Warnings about identifiers that will not match, said up front.
+
+    Every one of these rows is still uploaded — dropping them silently is how
+    an upload reports 100% success and matches nothing.
+    """
+    warnings: list[str] = []
+    if unusable_phones:
+        warnings.append(
+            f"{len(unusable_phones)} row(s) carry a phone number that is not "
+            "E.164 (no leading '+'), so the hashed value cannot match. Those "
+            "rows are uploaded without the phone identifier; first affected "
+            f"rows: {unusable_phones[:5]}."
+        )
+    if name_only:
+        warnings.append(
+            f"{len(name_only)} row(s) have only hashed names — Google usually "
+            "needs country and postal code next to them (and email or phone "
+            "match better still). Add a 'Country Code' and 'Postal Code' "
+            f"column; first affected rows: {name_only[:5]}."
+        )
+    if with_address == 0:
+        warnings.append(
+            "No row carries a country + postal code. Enhanced Conversions for "
+            "Leads matches far better with them, especially for name-based rows."
+        )
+    return warnings
 
 
 def draft_upload_enhanced_conversions_for_leads(
@@ -1306,11 +1386,61 @@ def draft_upload_enhanced_conversions_for_leads(
     if not rows:
         return {"error": "CSV contained zero conversion rows"}
 
+    # A row with nothing Google can match on would be uploaded to no effect and
+    # counted as a success later. Report it instead of sending it.
+    usable: list[dict] = []
+    skipped: list[dict] = []
+    for row_num, row in enumerate(rows, start=1):
+        has_address = bool(row["postal_code"] and row["country_code"])
+        has_names = bool(row["first_name_sha256"] and row["last_name_sha256"])
+        # Names alone are weak but not useless — Google can match on them, so
+        # such a row is uploaded and warned about rather than dropped.
+        if row["email_sha256"] or row["phone_sha256"] or has_address or has_names:
+            usable.append(row)
+            continue
+        skipped.append({
+            "row": row_num,
+            "reason": (
+                "phone is not E.164 and the row has no other identifier"
+                if row["phone_was_given"]
+                else (
+                    "no usable identifier — the row has no email, no E.164 "
+                    "phone, no country+postal code and no first/last name"
+                )
+            ),
+        })
+    if not usable:
+        return {
+            "error": (
+                "No row carries a usable identifier (email, E.164 phone, or "
+                "country + postal code). Nothing was planned."
+            ),
+            "skipped_rows": skipped,
+        }
+    rows = usable
+
     distinct_actions = sorted({r["conversion_name"] for r in rows})
     total_value = sum(r["conversion_value"] for r in rows)
     with_email = sum(1 for r in rows if r["email_sha256"])
     with_phone = sum(1 for r in rows if r["phone_sha256"])
     with_order_id = sum(1 for r in rows if r.get("order_id"))
+    with_address = sum(
+        1 for r in rows if r["postal_code"] and r["country_code"]
+    )
+    unusable_phones = [
+        row_num
+        for row_num, r in enumerate(rows, start=1)
+        if r["phone_was_given"] and not r["phone_usable"]
+    ]
+    name_only = [
+        row_num
+        for row_num, r in enumerate(rows, start=1)
+        if not r["email_sha256"]
+        and not r["phone_sha256"]
+        and r["first_name_sha256"]
+        and r["last_name_sha256"]
+        and not (r["postal_code"] and r["country_code"])
+    ]
 
     dedup_warnings: list[str] = []
     if with_order_id == 0:
@@ -1335,6 +1465,8 @@ def draft_upload_enhanced_conversions_for_leads(
             "phone_sha256": r["phone_sha256"],
             "first_name_sha256": r["first_name_sha256"],
             "last_name_sha256": r["last_name_sha256"],
+            "postal_code": r["postal_code"],
+            "country_code": r["country_code"],
             "conversion_name": r["conversion_name"],
             "conversion_time": r["conversion_time"],
             "conversion_value": r["conversion_value"],
@@ -1358,11 +1490,17 @@ def draft_upload_enhanced_conversions_for_leads(
             "rows_with_email": with_email,
             "rows_with_phone": with_phone,
             "rows_with_order_id": with_order_id,
+            "rows_with_address": with_address,
+            "skipped_count": len(skipped),
+            "skipped_rows": skipped,
             "distinct_conversion_actions": distinct_actions,
             "partial_failure": True,
             "consent": consent_norm,
             "parse_warnings": parse_errors,
             "dedup_warnings": dedup_warnings,
+            "match_warnings": match_warnings(
+                with_address, unusable_phones, name_only
+            ),
             "sample_rows": [
                 {
                     "email_sha256": (r["email_sha256"][:16] + "...")
@@ -1478,10 +1616,20 @@ def _apply_upload_enhanced_conversions_for_leads(
                 uid = client.get_type("UserIdentifier")
                 uid.hashed_phone_number = r["phone_sha256"]
                 cc.user_identifiers.append(uid)
-            if r["first_name_sha256"] and r["last_name_sha256"]:
+            # Address info: Google hashes only the names; country and postal
+            # code go in as plain values. A country+postal pair is a usable
+            # identifier on its own, which is why name-only rows are worth
+            # completing rather than dropping.
+            has_address = bool(r.get("postal_code") and r.get("country_code"))
+            if (r["first_name_sha256"] and r["last_name_sha256"]) or has_address:
                 uid = client.get_type("UserIdentifier")
-                uid.address_info.hashed_first_name = r["first_name_sha256"]
-                uid.address_info.hashed_last_name = r["last_name_sha256"]
+                if r["first_name_sha256"] and r["last_name_sha256"]:
+                    uid.address_info.hashed_first_name = r["first_name_sha256"]
+                    uid.address_info.hashed_last_name = r["last_name_sha256"]
+                if r.get("postal_code"):
+                    uid.address_info.postal_code = r["postal_code"]
+                if r.get("country_code"):
+                    uid.address_info.country_code = r["country_code"]
                 cc.user_identifiers.append(uid)
             payload.append(cc)
         response = upload_service.upload_click_conversions(

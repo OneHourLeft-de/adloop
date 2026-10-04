@@ -1836,3 +1836,168 @@ class TestUploadBatching:
         )
 
         assert result["requires_double_confirm"] is True
+
+
+_EC_HEADER_ADDRESS = _EC_HEADER.replace(
+    "Conversion Currency", "Conversion Currency,Country Code,Postal Code"
+)
+
+
+class TestSkippedAndUnmatchableRows:
+    """Rows that cannot match are reported, not uploaded and not silently counted."""
+
+    def test_call_rows_without_a_usable_caller_id_are_reported(self, config, tmp_path):
+        path = tmp_path / "phone.csv"
+        path.write_text(
+            _CALL_HEADER
+            + "+15555550142,2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,10,USD\n"
+            + ",2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,10,USD\n"
+            + "02079460018,2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,10,USD\n"
+        )
+
+        result = conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+        plan = _stored_plan(result)
+
+        assert plan.changes["row_count"] == 1
+        assert plan.changes["skipped_count"] == 2
+        assert [s["row"] for s in plan.changes["skipped_rows"]] == [2, 3]
+        assert "empty" in plan.changes["skipped_rows"][0]["reason"]
+        assert "E.164" in plan.changes["skipped_rows"][1]["reason"]
+        assert len(plan.apply_only_payload["rows"]) == 1
+
+    def test_a_csv_of_only_unusable_call_rows_plans_nothing(self, config, tmp_path):
+        path = tmp_path / "phone.csv"
+        path.write_text(
+            _CALL_HEADER
+            + ",2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,10,USD\n"
+        )
+
+        result = conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+
+        assert "Nothing was planned" in result["error"]
+        assert result["skipped_rows"][0]["row"] == 1
+
+    def test_ec_rows_without_any_identifier_are_reported(self, config, tmp_path):
+        path = tmp_path / "leads.csv"
+        path.write_text(
+            _EC_HEADER + "\n"
+            + "user@example.com,+15555550142,Test,User,A,"
+              "2026-03-01T12:00:00Z,10,USD\n"
+            + ",,,,A,2026-03-01T12:00:00Z,10,USD\n"
+        )
+
+        result = conversion_actions.draft_upload_enhanced_conversions_for_leads(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+        plan = _stored_plan(result)
+
+        assert plan.changes["row_count"] == 1
+        assert plan.changes["skipped_count"] == 1
+        assert "no usable identifier" in plan.changes["skipped_rows"][0]["reason"]
+
+    def test_name_only_rows_are_kept_but_warned(self, config, tmp_path):
+        path = tmp_path / "leads.csv"
+        path.write_text(
+            _EC_HEADER + "\n"
+            + ",,Test,User,A,2026-03-01T12:00:00Z,10,USD\n"
+        )
+
+        result = conversion_actions.draft_upload_enhanced_conversions_for_leads(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+        plan = _stored_plan(result)
+
+        # Name-only is kept (Google may match names), but the preview says why
+        # it usually will not.
+        assert plan.changes["row_count"] == 1
+        assert any("only hashed names" in w for w in plan.changes["match_warnings"])
+
+    def test_a_non_e164_phone_drops_the_identifier_and_warns(self, config, tmp_path):
+        """The row survives on its email; only the unusable phone is dropped."""
+        path = tmp_path / "leads.csv"
+        path.write_text(
+            _EC_HEADER + "\n"
+            + "user@example.com,02079460018,,,A,"
+              "2026-03-01T12:00:00Z,10,USD\n"
+        )
+
+        result = conversion_actions.draft_upload_enhanced_conversions_for_leads(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+        plan = _stored_plan(result)
+
+        row = plan.apply_only_payload["rows"][0]
+        assert row["phone_sha256"] == ""           # not a matchable hash
+        assert row["email_sha256"]                 # but the row is still useful
+        assert any("not E.164" in w for w in plan.changes["match_warnings"])
+
+    def test_a_row_with_only_an_unusable_phone_is_skipped(self, config, tmp_path):
+        path = tmp_path / "leads.csv"
+        path.write_text(
+            _EC_HEADER + "\n"
+            + ",02079460018,,,A,2026-03-01T12:00:00Z,10,USD\n"
+        )
+
+        result = conversion_actions.draft_upload_enhanced_conversions_for_leads(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+
+        assert "Nothing was planned" in result["error"]
+        assert "not E.164" in result["skipped_rows"][0]["reason"]
+
+    def test_country_and_postal_reach_the_address_info(self):
+        upload = _FakeClickUploadService(results_count=1)
+        ads = _FakeGoogleAdsService([
+            _FakeSearchRow(
+                "A", "customers/1/conversionActions/8", type_name="UPLOAD_CLICKS"
+            )
+        ])
+        rows = [{
+            "email_sha256": _EMAIL_HASH,
+            "phone_sha256": "",
+            "first_name_sha256": _FIRST_HASH,
+            "last_name_sha256": _LAST_HASH,
+            "postal_code": "85521",
+            "country_code": "DE",
+            "conversion_name": "A",
+            "conversion_time": "2026-03-01 13:00:00+00:00",
+            "conversion_value": 1.0,
+            "currency_code": "EUR",
+            "order_id": "o-1",
+        }]
+
+        conversion_actions._apply_upload_enhanced_conversions_for_leads(
+            _ec_client_with(upload=upload, ads=ads),
+            "1234567890",
+            {"row_count": 1, "rows": rows},
+        )
+
+        conversion = upload.calls[0]["conversions"][0]
+        address = [
+            uid.address_info for uid in conversion.user_identifiers
+            if uid.address_info.postal_code
+        ][0]
+        assert address.postal_code == "85521"
+        assert address.country_code == "DE"
+        assert address.hashed_first_name == _FIRST_HASH
+
+    def test_csv_with_address_columns_counts_them(self, config, tmp_path):
+        path = tmp_path / "leads.csv"
+        path.write_text(
+            _EC_HEADER_ADDRESS + "\n"
+            + ",,Test,User,A,2026-03-01T12:00:00Z,10,USD,DE,85521\n"
+        )
+
+        result = conversion_actions.draft_upload_enhanced_conversions_for_leads(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+        plan = _stored_plan(result)
+
+        assert plan.changes["rows_with_address"] == 1
+        assert not any(
+            "only hashed names" in w for w in plan.changes["match_warnings"]
+        )
