@@ -2601,18 +2601,23 @@ def _partial_upload_message(e: object) -> str:
 
     The raw ``error`` and this message both reach the caller, so they must not
     disagree about what is safe to do next. When a batch's fate is unknown the
-    message names exactly those CSV lines, tells the caller to check the
-    conversion action first, and points the resume hint *after* the batch —
-    pointing at its first line is what invites a duplicate upload.
+    message names exactly those CSV lines and tells the caller to check the
+    conversion action first. The resume hint names the first row of the *next*
+    batch, never the uncertain batch's own first line (that invites a
+    duplicate upload), and it is ``None`` when nothing follows.
     """
     if getattr(e, "unknown_status", False):
-        first, after = e.uncertain_lines
+        first, last = e.uncertain_lines
+        rest = (
+            f"Draft the remaining rows from line {e.resume_from_line}."
+            if e.resume_from_line is not None
+            else "No rows remain after these."
+        )
         return (
-            f"{e.uncertain_rows} row(s) in lines {first}-{after - 1} may or may "
-            "not have been received: check the conversion action for them "
-            "first, then draft the remaining rows from line "
-            f"{e.resume_from_line}. The plan is no longer pending, so it cannot "
-            "resend anything."
+            f"{e.uncertain_rows} row(s) in lines {first}-{last} may or may not "
+            "have been received: check the conversion action for them first. "
+            f"{rest} The plan is no longer pending, so it cannot resend "
+            "anything."
         )
     return (
         f"{e.uploaded_total} row(s) are uploaded; the plan is no longer "

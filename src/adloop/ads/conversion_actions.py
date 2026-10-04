@@ -1370,6 +1370,19 @@ def _source_line(row: dict, fallback: int) -> object:
     return row.get("source_line") or fallback
 
 
+def _next_batch_first_line(rows: list[dict], next_index: int) -> object:
+    """The source line of the row at ``next_index``, or ``None`` if there is none.
+
+    A resume hint must name a row that is really still to be sent. Adding one
+    to the previous batch's last line would land inside that record when a
+    quoted field spans several lines, on a comment line, or past the end of the
+    file when the failing batch was the last one.
+    """
+    if next_index >= len(rows):
+        return None
+    return _source_line(rows[next_index], next_index + 1)
+
+
 def _failure_from(
     exc: Exception,
     *,
@@ -1377,6 +1390,7 @@ def _failure_from(
     batch_total: int,
     first_line: object,
     last_line: object,
+    resume_line: object,
     done: int,
     completed_batches: int,
     chunk: list[dict],
@@ -1424,28 +1438,36 @@ def _failure_from(
             f"be sent again — resume the CSV at line {first_line}."
         )
     else:
+        rest = (
+            f"the remaining rows can be drafted from line {resume_line}."
+            if resume_line is not None
+            else "no rows remain after these."
+        )
         message = (
             f"Batch {index + 1} of {batch_total} (CSV lines {first_line}-"
             f"{last_line}) failed with an unknown outcome: {detail} Those lines "
             "may or may not have been received — check the conversion action "
             "for them before anything else; do not resend them "
             f"unconditionally. {done} row(s) from earlier batches are "
-            f"definitely in, and the remaining rows can be drafted from line "
-            f"{last_line + 1}."
+            f"definitely in, and {rest}"
         )
 
     return PartialUploadError(
         message,
         batches=ledger,
         uploaded_total=done,
-        # For an unknown outcome the line to resume from is the first line
-        # *after* the uncertain batch: the batch itself has to be checked
-        # first, so pointing at its first line would invite a duplicate.
-        resume_from_line=last_line + 1 if unknown else first_line,
+        # For an unknown outcome the line to resume from is the first line of
+        # the *next* batch: the uncertain batch itself has to be checked first,
+        # so pointing at its first line would invite a duplicate, and there is
+        # nothing left to draft when no batch follows.
+        resume_from_line=resume_line if unknown else first_line,
         dry_run=dry_run,
         row_errors=row_errors + batch_row_errors,
         unknown_status=unknown,
-        uncertain_lines=[first_line, last_line + 1] if unknown else [],
+        # Inclusive, like ``first_source_line``/``last_source_line`` in the
+        # ledger: a half-open interval in a field a model reads invites
+        # off-by-one mistakes.
+        uncertain_lines=[first_line, last_line] if unknown else [],
         uncertain_rows=len(chunk) if unknown else 0,
     )
 
@@ -1478,6 +1500,9 @@ def _upload_in_batches(
         chunk = rows[start:start + _MAX_ROWS_PER_REQUEST]
         first_line = _source_line(chunk[0], start + 1)
         last_line = _source_line(chunk[-1], start + len(chunk))
+        # Where the next batch begins, for a resume hint that names a row that
+        # is really still to be sent.
+        next_line = _next_batch_first_line(rows, start + len(chunk))
 
         # Phase 1: build the request. Nothing has left the process yet, so a
         # failure here is an explicit "not sent" and the plan stays retryable.
@@ -1499,6 +1524,7 @@ def _upload_in_batches(
                 batch_total=batch_total,
                 first_line=first_line,
                 last_line=last_line,
+                resume_line=next_line,
                 done=sum(batch["uploaded"] for batch in ledger),
                 completed_batches=len(ledger),
                 chunk=chunk,
@@ -1548,14 +1574,13 @@ def _upload_in_batches(
                 f"be read: {exc} The rows may have been received — check the "
                 "conversion action before resending them.",
                 batches=ledger,
-                uploaded_total=sum(batch["uploaded"] for batch in ledger)
-                + len(payload),
-                resume_from_line=last_line + 1,
+                uploaded_total=sum(batch["uploaded"] for batch in ledger),
+                resume_from_line=next_line,
                 dry_run=dry_run,
                 row_errors=row_errors,
                 unknown_status=True,
-                uncertain_lines=[first_line, last_line + 1],
-                uncertain_rows=len(payload),
+                uncertain_lines=[first_line, last_line],
+                uncertain_rows=len(chunk),
             ) from exc
 
     uploaded_total = sum(batch["uploaded"] for batch in ledger)

@@ -3207,20 +3207,50 @@ class TestThePlanIsClaimedBeforeUploading:
         assert result["unknown_status"] is True
         assert "unknown outcome" in result["error"]
         assert "may or may not have been received" in result["error"]
-        # The uncertain batch is named, and the resume line points *after* it —
-        # pointing at its first line would invite exactly the duplicate the
-        # error warns about.
-        assert result["uncertain_lines"] == [2002, 2503]
-        assert result["resume_from_line"] == 2503
+        # The uncertain batch is named inclusively, like the ledger's
+        # first/last source lines.
+        assert result["uncertain_lines"] == [2002, 2502]
+        assert result["uploaded_total"] == 2000
+        # This batch is the last one, so there is nothing left to draft — a
+        # number here would point past the end of the file.
+        assert result["resume_from_line"] is None
         # The message must not contradict the error.
         assert "may or may not have been received" in result["message"]
         # 2000 rows went in batch 1, so the uncertain batch holds 501 of them.
         assert "501 row(s) in lines 2002-2502" in result["message"]
-        assert "from line 2503" in result["message"]
+        assert "No rows remain after these." in result["message"]
         # The plan is retired either way: those rows cannot be sent again safely.
         assert preview_store.get_plan(preview["plan_id"]) is None
         logged = (tmp_path / "audit.log").read_text()
         assert '"result": "unknown_status"' in logged
+
+    def test_an_uncertain_batch_that_is_not_last_names_the_next_line(
+        self, tmp_path, monkeypatch
+    ):
+        """Three batches: the uncertain middle one must not eat the third's rows."""
+        config = self._config(tmp_path)
+        upload = _FakeUploadService(
+            results_count=10_000,
+            fail_on_call=2,
+            fail_exception=RuntimeError("DEADLINE_EXCEEDED"),
+        )
+        preview, _upload = self._plan(
+            config, tmp_path, monkeypatch, rows=4501, upload=upload
+        )
+
+        result = write.confirm_and_apply(
+            config, plan_id=preview["plan_id"], dry_run=False
+        )
+
+        assert result["status"] == "PARTIAL_UPLOAD", result
+        assert result["uncertain_lines"] == [2002, 4001]
+        assert result["uploaded_total"] == 2000
+        # Batch 3 starts on source line 4002: the header is line 1, so row n is
+        # on line n + 1.
+        assert result["resume_from_line"] == 4002
+        assert "2000 row(s) in lines 2002-4001" in result["message"]
+        assert "from line 4002" in result["message"]
+        assert "No rows remain" not in result["message"]
 
     def test_a_rejection_resumes_at_the_failed_batch(
         self, tmp_path, monkeypatch
@@ -3387,7 +3417,7 @@ class TestUnreadableResponseAndTimeZoneRows:
             ),
         )
 
-    def test_an_unreadable_response_counts_the_batch_as_uncertain(
+    def test_an_unreadable_response_names_the_uncertain_batch(
         self, tmp_path, monkeypatch
     ):
         _patch_drafts_client(monkeypatch, "UPLOAD_CALLS")
@@ -3419,14 +3449,16 @@ class TestUnreadableResponseAndTimeZoneRows:
 
         assert result["status"] == "PARTIAL_UPLOAD", result
         assert result["unknown_status"] is True
-        # The batch went out, so it counts and is named.
-        assert result["uploaded_total"] == 3
-        assert result["uncertain_lines"] == [2, 5]
-        assert result["resume_from_line"] == 5
+        # The request went out but its answer could not be read, so the batch
+        # is uncertain, not uploaded: ``uploaded_total`` counts only what is
+        # proven to be in.
+        assert result["uploaded_total"] == 0
+        assert result["uncertain_lines"] == [2, 4]
+        assert result["resume_from_line"] is None
         assert "could not be read" in result["error"]
         # The message names the same lines and does not ask for a resend.
         assert "3 row(s) in lines 2-4" in result["message"]
-        assert "from line 5" in result["message"]
+        assert "No rows remain after these." in result["message"]
         assert preview_store.get_plan(preview["plan_id"]) is None
 
     def test_a_bad_offset_row_is_reported_without_a_crash(
@@ -3486,3 +3518,74 @@ class TestUnreadableResponseAndTimeZoneRows:
         row = _stored_plan(result).apply_only_payload["rows"][0]
 
         assert row["call_start_time"] == "2026-03-01 12:00:00+01:00"
+
+
+class TestResumeLineNamesTheNextBatch:
+    """The resume hint must name a row that is really still to be sent.
+
+    Adding one to the failing batch's last line would land inside a record
+    whose quoted field spans several lines, on a skipped or comment line, or
+    past the end of the file when the batch was the last one.
+    """
+
+    def _run(self, monkeypatch, source_lines, *, fail_on_call, exc, batch_size=2):
+        monkeypatch.setattr(conversion_actions, "_MAX_ROWS_PER_REQUEST", batch_size)
+        rows = [
+            {"source_line": line, "caller_id": f"+1415555{index:04d}"}
+            for index, line in enumerate(source_lines)
+        ]
+        calls: list[int] = []
+
+        def send(payload):
+            calls.append(len(payload))
+            if len(calls) == fail_on_call:
+                raise exc
+            return SimpleNamespace(results=[])
+
+        with pytest.raises(conversion_actions.PartialUploadError) as info:
+            conversion_actions._upload_in_batches(
+                rows, lambda chunk: list(chunk), send
+            )
+        return info.value
+
+    def test_the_next_batch_supplies_the_resume_line(self, monkeypatch):
+        # Record 2 spans lines 3-9, so "last line + 1" would point into it.
+        error = self._run(
+            monkeypatch,
+            [2, 10, 20, 21, 30],
+            fail_on_call=1,
+            exc=RuntimeError("DEADLINE_EXCEEDED"),
+        )
+
+        assert error.unknown_status is True
+        assert error.uncertain_lines == [2, 10]
+        assert error.uncertain_rows == 2
+        assert error.uploaded_total == 0
+        assert error.resume_from_line == 20
+
+    def test_the_last_batch_has_nothing_to_resume(self, monkeypatch):
+        error = self._run(
+            monkeypatch,
+            [2, 3, 4],
+            fail_on_call=2,
+            exc=RuntimeError("DEADLINE_EXCEEDED"),
+        )
+
+        # Only the first batch is provably in; the second may or may not be.
+        assert error.uploaded_total == 2
+        assert error.uncertain_lines == [4, 4]
+        assert error.uncertain_rows == 1
+        assert error.resume_from_line is None
+        assert "no rows remain after these" in str(error)
+
+    def test_a_rejection_keeps_the_failed_batch_first_line(self, monkeypatch):
+        error = self._run(
+            monkeypatch,
+            [2, 3, 4],
+            fail_on_call=2,
+            exc=_google_rejection("INVALID_ARGUMENT"),
+        )
+
+        assert error.unknown_status is False
+        assert error.uncertain_lines == []
+        assert error.resume_from_line == 4
