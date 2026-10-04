@@ -2645,6 +2645,13 @@ def confirm_and_apply(
                 validation = _validate_with_google(config, plan)
         except Exception as e:
             error_message = _extract_error_message(e)
+            # Google reports per-conversion errors by request index; the upload
+            # appliers translate them into CSV lines before raising.
+            from adloop.ads.conversion_actions import PartialUploadError
+
+            row_errors = (
+                e.row_errors if isinstance(e, PartialUploadError) else []
+            )
             log_mutation(
                 config.safety.log_file,
                 operation=plan.operation,
@@ -2666,6 +2673,7 @@ def confirm_and_apply(
                 "plan_id": plan.plan_id,
                 "operation": plan.operation,
                 "error": error_message,
+                **({"row_errors": row_errors} if row_errors else {}),
                 "message": (
                     f"The dry run {checked_against} and found a problem; "
                     "nothing was changed. The real apply would fail the same "
@@ -2806,6 +2814,7 @@ def confirm_and_apply(
                 "uploaded_total": e.uploaded_total,
                 "batches": e.batches,
                 "resume_from_line": e.resume_from_line,
+                **({"row_errors": e.row_errors} if e.row_errors else {}),
                 "message": (
                     f"{e.uploaded_total} row(s) are uploaded; the plan is no "
                     "longer pending, so confirming it again cannot resend them. "

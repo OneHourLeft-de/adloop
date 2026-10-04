@@ -1259,12 +1259,36 @@ class PartialUploadError(RuntimeError):
         uploaded_total: int,
         resume_from_line: object,
         dry_run: bool,
+        row_errors: list[dict] | None = None,
     ) -> None:
         super().__init__(message)
         self.batches = batches
         self.uploaded_total = uploaded_total
         self.resume_from_line = resume_from_line
         self.dry_run = dry_run
+        self.row_errors = row_errors or []
+
+
+def _row_errors_from_failure(
+    client: object, failure: object, chunk: list[dict], *, batch: int, offset: int
+) -> list[dict]:
+    """Turn Google's per-conversion errors into per-row messages.
+
+    Google reports ``conversions[i]`` — an index into the request, not into the
+    file. Mapping it back to the row's ``source_line`` is the difference between
+    "batch 2 failed" and "line 1234 failed: invalid conversion action".
+    """
+    from adloop.ads.write import _parse_partial_failure_per_op
+
+    per_op = _parse_partial_failure_per_op(client, failure)
+    out: list[dict] = []
+    for index, message in sorted(per_op.items()):
+        if 0 <= index < len(chunk):
+            line = _source_line(chunk[index], offset + index + 1)
+        else:
+            line = None
+        out.append({"batch": batch, "line": line, "error": message})
+    return out
 
 
 def _source_line(row: dict, fallback: int) -> object:
@@ -1272,7 +1296,9 @@ def _source_line(row: dict, fallback: int) -> object:
     return row.get("source_line") or fallback
 
 
-def _upload_in_batches(rows: list[dict], send, *, dry_run: bool = False) -> dict:
+def _upload_in_batches(
+    rows: list[dict], send, *, dry_run: bool = False, client: object = None
+) -> dict:
     """Send ``rows`` in API-sized batches and report progress per batch.
 
     ``send(chunk)`` builds the protos for one chunk, calls the upload service
@@ -1300,6 +1326,14 @@ def _upload_in_batches(rows: list[dict], send, *, dry_run: bool = False) -> dict
             payload, response = send(chunk)
         except Exception as exc:  # noqa: BLE001 — re-raised with the ledger
             done = sum(batch["uploaded"] for batch in ledger)
+            failure = getattr(exc, "failure", None)
+            batch_row_errors = (
+                _row_errors_from_failure(
+                    client, failure, chunk, batch=index + 1, offset=start
+                )
+                if failure is not None
+                else []
+            )
             if dry_run:
                 message = (
                     f"Validation failed in batch {index + 1} of {batch_total} "
@@ -1320,6 +1354,7 @@ def _upload_in_batches(rows: list[dict], send, *, dry_run: bool = False) -> dict
                 uploaded_total=done,
                 resume_from_line=first_line,
                 dry_run=dry_run,
+                row_errors=row_errors + batch_row_errors,
             ) from exc
 
         results = list(response.results)
@@ -1344,6 +1379,11 @@ def _upload_in_batches(rows: list[dict], send, *, dry_run: bool = False) -> dict
                 "message": partial.message,
                 "code": getattr(partial, "code", None),
             })
+            row_errors.extend(
+                _row_errors_from_failure(
+                    client, partial, chunk, batch=index + 1, offset=start
+                )
+            )
 
     uploaded_total = sum(batch["uploaded"] for batch in ledger)
     return {
@@ -1407,7 +1447,10 @@ def _apply_upload_call_conversions(
         return payload, response
 
     ledger = _upload_in_batches(
-        rows, _send, dry_run=bool(getattr(client, "is_validate_only", False))
+        rows,
+        _send,
+        dry_run=bool(getattr(client, "is_validate_only", False)),
+        client=client,
     )
     ledger["conversion_actions_used"] = action_resources
     return ledger
@@ -1917,7 +1960,10 @@ def _apply_upload_enhanced_conversions_for_leads(
         return payload, response
 
     ledger = _upload_in_batches(
-        rows, _send, dry_run=bool(getattr(client, "is_validate_only", False))
+        rows,
+        _send,
+        dry_run=bool(getattr(client, "is_validate_only", False)),
+        client=client,
     )
     ledger["conversion_actions_used"] = action_resources
     return ledger

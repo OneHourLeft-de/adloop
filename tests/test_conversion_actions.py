@@ -776,6 +776,8 @@ class _FakeUploadService:
         self._results_count = results_count
         self._error_message = error_message
         self._fail_on_call = fail_on_call
+        # Optional real proto, set by tests that need per-index detail.
+        self.partial_failure = None
 
     def upload_call_conversions(
         self, request=None, *, customer_id=None, conversions=None, partial_failure=None
@@ -806,6 +808,8 @@ class _FakeUploadService:
                 ),
                 caller_id=c.caller_id,  # API echoes this back even on failure
             ))
+        if self.partial_failure is not None:
+            return SimpleNamespace(results=results, partial_failure_error=self.partial_failure)
         partial = (
             SimpleNamespace(message=self._error_message, code=0)
             if self._error_message
@@ -2970,3 +2974,97 @@ class TestValueAndCurrencyAreOptional:
             "2026-03-01T13:00:00Z,10,US",
         )
         assert "3-letter ISO code" in " ".join(bad["details"])
+
+
+def _partial_failure_with_index(client, index: int, message: str):
+    """A partial_failure_error naming conversions[index], as Google sends it."""
+    from google.protobuf.any_pb2 import Any as AnyProto
+    from google.ads.googleads.v25.errors.types import errors as err_types
+
+    failure = err_types.GoogleAdsFailure(
+        errors=[
+            err_types.GoogleAdsError(
+                message=message,
+                location=err_types.ErrorLocation(
+                    field_path_elements=[
+                        err_types.ErrorLocation.FieldPathElement(index=index)
+                    ]
+                ),
+            )
+        ]
+    )
+    detail = AnyProto()
+    # proto-plus wraps the protobuf message; serialize the underlying proto.
+    detail.value = type(failure).pb(failure).SerializeToString()
+    return SimpleNamespace(code=3, message="partial failure", details=[detail])
+
+
+class TestPerLineErrors:
+    """Google reports `conversions[i]`; the caller needs the CSV line."""
+
+    def _config(self, tmp_path):
+        return AdLoopConfig(
+            ads=AdsConfig(customer_id="123-456-7890"),
+            safety=SafetyConfig(
+                require_dry_run=False, log_file=str(tmp_path / "audit.log")
+            ),
+        )
+
+    def _plan(self, config, tmp_path, monkeypatch):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CALLS")
+        path = tmp_path / "phone.csv"
+        path.write_text(
+            _CALL_HEADER
+            + "+14155550142,2026-03-01T12:00:00Z,My Action,"
+              "2026-03-01T13:00:00Z,10,USD\n"
+            + "+14155550143,2026-03-01T12:00:00Z,My Action,"
+              "2026-03-01T13:00:00Z,10,USD\n"
+        )
+        preview = conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+        upload = _FakeUploadService(results_count=1)
+        client = _client_with(
+            upload_service=upload, ads_service=_EchoActionRows("UPLOAD_CALLS")
+        )
+        monkeypatch.setattr("adloop.ads.client.get_ads_client", lambda _cfg: client)
+        return preview, upload, client
+
+    def test_a_rejected_row_is_named_by_its_csv_line(self, tmp_path, monkeypatch):
+        config = self._config(tmp_path)
+        preview, upload, client = self._plan(config, tmp_path, monkeypatch)
+        upload.partial_failure = _partial_failure_with_index(
+            client, 1, "Conversion action is invalid"
+        )
+
+        result = write.confirm_and_apply(
+            config, plan_id=preview["plan_id"], dry_run=False
+        )
+
+        assert result["status"] == "APPLIED", result
+        # Row index 1 is the second data row, i.e. line 3 of the file.
+        assert {"batch": 1, "line": 3, "error": "Conversion action is invalid"} in (
+            result["result"]["row_errors"]
+        )
+
+    def test_the_dry_run_names_the_line_too(self, tmp_path, monkeypatch):
+        config = self._config(tmp_path, )
+        preview, upload, client = self._plan(config, tmp_path, monkeypatch)
+        upload.partial_failure = _partial_failure_with_index(
+            client, 1, "Conversion action is invalid"
+        )
+        # The suite stubs the real validate-only path; restore it for this test.
+        monkeypatch.setattr(
+            write,
+            "_validate_with_google",
+            lambda cfg, plan: write._execute_plan(cfg, plan, validate_only=True),
+        )
+
+        result = write.confirm_and_apply(
+            config, plan_id=preview["plan_id"], dry_run=True
+        )
+
+        assert result["status"] == "DRY_RUN_FAILED", result
+        assert result["row_errors"] == [
+            {"batch": 1, "line": 3, "error": "Conversion action is invalid"}
+        ]

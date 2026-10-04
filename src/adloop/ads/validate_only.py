@@ -28,7 +28,16 @@ _READ_METHODS = frozenset({"search", "search_stream"})
 
 
 class ValidateOnlyFailure(Exception):
-    """Google rejected part of a validate-only request (partial failure)."""
+    """Google rejected part of a validate-only request (partial failure).
+
+    Carries the ``partial_failure_error`` proto so callers can turn Google's
+    per-conversion errors into per-row messages — the same detail a real apply
+    gets from the response.
+    """
+
+    def __init__(self, message: str, *, failure: object = None) -> None:
+        super().__init__(message)
+        self.failure = failure
 
 
 class ValidateOnlyClient:
@@ -85,7 +94,10 @@ class _ValidateOnlyService:
                 self._owner.validated_calls += 1
                 failure = getattr(response, "partial_failure_error", None)
                 if failure is not None and getattr(failure, "code", 0):
-                    raise ValidateOnlyFailure(getattr(failure, "message", "") or str(failure))
+                    raise ValidateOnlyFailure(
+                        getattr(failure, "message", "") or str(failure),
+                        failure=failure,
+                    )
 
             return _placeholder_response(request.customer_id, len(operations), attr == "mutate")
 
