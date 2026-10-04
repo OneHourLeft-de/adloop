@@ -369,3 +369,37 @@ class TestCompactTotalsDisclosure:
         result = read.get_search_terms(config, customer_id="123", compact=True)
 
         assert "partial" not in result["totals"]
+
+
+class TestSearchTermsDateWindow:
+    """``search_term_view`` needs an explicit date segment; the range wins."""
+
+    def _capture(self, monkeypatch, rows=None):
+        from adloop.ads import gaql
+
+        seen = {}
+
+        def _query(_config, _cid, query):
+            seen["query"] = query
+            return list(rows or [])
+
+        monkeypatch.setattr(gaql, "execute_query", _query)
+        return seen
+
+    def test_the_default_window_is_the_last_thirty_days(self, config, monkeypatch):
+        seen = self._capture(monkeypatch)
+
+        read.get_search_terms(config, customer_id="123")
+
+        assert "segments.date DURING LAST_30_DAYS" in seen["query"]
+
+    def test_a_given_range_replaces_the_default(self, config, monkeypatch):
+        seen = self._capture(monkeypatch)
+
+        read.get_search_terms(
+            config, customer_id="123",
+            date_range_start="2026-03-01", date_range_end="2026-03-31",
+        )
+
+        assert "segments.date BETWEEN '2026-03-01' AND '2026-03-31'" in seen["query"]
+        assert "LAST_30_DAYS" not in seen["query"]

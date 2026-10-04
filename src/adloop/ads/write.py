@@ -3794,7 +3794,6 @@ def _apply_create_campaign(client: object, cid: str, changes: dict) -> dict:
     results = {}
     num_keywords = len(kw_list)
     num_geo = len(changes.get("geo_target_ids") or [])
-    num_lang = len(changes.get("language_ids") or [])
     for i, resp in enumerate(response.mutate_operation_responses):
         rn = _extract_resource_name(resp)
         if rn:
