@@ -774,6 +774,7 @@ class _FakeUploadService:
         error_message: str = "",
         fail_on_call: int = 0,
         fail_exception: Exception | None = None,
+        results_error: Exception | None = None,
     ):
         self.called_with: dict | None = None
         self.calls: list[dict] = []
@@ -781,6 +782,7 @@ class _FakeUploadService:
         self._error_message = error_message
         self._fail_on_call = fail_on_call
         self._fail_exception = fail_exception
+        self._results_error = results_error
         # Optional real proto, set by tests that need per-index detail.
         self.partial_failure = None
 
@@ -813,6 +815,8 @@ class _FakeUploadService:
                 ),
                 caller_id=c.caller_id,  # API echoes this back even on failure
             ))
+        if self._results_error is not None:
+            return _UnreadableResponse(self._results_error)
         if self.partial_failure is not None:
             return SimpleNamespace(results=results, partial_failure_error=self.partial_failure)
         partial = (
@@ -2989,6 +2993,17 @@ class TestValueAndCurrencyAreOptional:
         assert "3-letter ISO code" in " ".join(bad["details"])
 
 
+class _UnreadableResponse:
+    """A response whose results cannot be read — the batch is already sent."""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    @property
+    def results(self):
+        raise self._exc
+
+
 def _google_rejection(message: str):
     """A GoogleAdsException as Google raises it for a rejected request."""
     from google.ads.googleads.errors import GoogleAdsException
@@ -3191,11 +3206,49 @@ class TestThePlanIsClaimedBeforeUploading:
         assert result["status"] == "PARTIAL_UPLOAD", result
         assert result["unknown_status"] is True
         assert "unknown outcome" in result["error"]
-        assert "may have been received" in result["error"]
+        assert "may or may not have been received" in result["error"]
+        # The uncertain batch is named, and the resume line points *after* it —
+        # pointing at its first line would invite exactly the duplicate the
+        # error warns about.
+        assert result["uncertain_lines"] == [2002, 2503]
+        assert result["resume_from_line"] == 2503
+        # The message must not contradict the error.
+        assert "may or may not have been received" in result["message"]
+        # 2000 rows went in batch 1, so the uncertain batch holds 501 of them.
+        assert "501 row(s) in lines 2002-2502" in result["message"]
+        assert "from line 2503" in result["message"]
         # The plan is retired either way: those rows cannot be sent again safely.
         assert preview_store.get_plan(preview["plan_id"]) is None
         logged = (tmp_path / "audit.log").read_text()
         assert '"result": "unknown_status"' in logged
+
+    def test_a_rejection_resumes_at_the_failed_batch(
+        self, tmp_path, monkeypatch
+    ):
+        """A rejection is an answer, so the batch can be sent again as-is."""
+        config = self._config(tmp_path)
+        upload = _FakeUploadService(
+            results_count=10_000,
+            fail_on_call=2,
+            fail_exception=_google_rejection("INVALID_ARGUMENT"),
+        )
+        preview, _upload = self._plan(
+            config, tmp_path, monkeypatch, rows=2501, upload=upload
+        )
+
+        result = write.confirm_and_apply(
+            config, plan_id=preview["plan_id"], dry_run=False
+        )
+
+        assert result["status"] == "PARTIAL_UPLOAD", result
+        assert result["unknown_status"] is False
+        # Nothing is uncertain here: the batch was answered, so the fix belongs
+        # inside that batch and the resume hint points at its first row.
+        assert "uncertain_lines" not in result
+        assert result["resume_from_line"] == 2002
+        assert result["uploaded_total"] == 2000
+        assert "2000 row(s) are uploaded" in result["message"]
+        assert "Resume the CSV at line 2002" in result["message"]
 
 
 class TestClaimFallbackAndUnknownStatus:
@@ -3321,3 +3374,115 @@ class TestOffsetTimeZoneRows:
         row = _stored_plan(result).apply_only_payload["rows"][0]
 
         assert row["call_start_time"] == "2026-03-01 12:00:00-05:00"
+
+
+class TestUnreadableResponseAndTimeZoneRows:
+    """Two ways an upload can end without a usable answer."""
+
+    def _config(self, tmp_path):
+        return AdLoopConfig(
+            ads=AdsConfig(customer_id="123-456-7890"),
+            safety=SafetyConfig(
+                require_dry_run=False, log_file=str(tmp_path / "audit.log")
+            ),
+        )
+
+    def test_an_unreadable_response_counts_the_batch_as_uncertain(
+        self, tmp_path, monkeypatch
+    ):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CALLS")
+        path = tmp_path / "phone.csv"
+        path.write_text(
+            _CALL_HEADER
+            + "".join(
+                f"+1415555{i:04d},2026-03-01T12:00:00Z,My Action,"
+                f"2026-03-01T13:00:00Z,10,USD\n"
+                for i in range(3)
+            )
+        )
+        config = self._config(tmp_path)
+        preview = conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+        upload = _FakeUploadService(
+            results_count=10_000,
+            results_error=RuntimeError("response parsing failed"),
+        )
+        client = _client_with(
+            upload_service=upload, ads_service=_EchoActionRows("UPLOAD_CALLS")
+        )
+        monkeypatch.setattr("adloop.ads.client.get_ads_client", lambda _cfg: client)
+
+        result = write.confirm_and_apply(
+            config, plan_id=preview["plan_id"], dry_run=False
+        )
+
+        assert result["status"] == "PARTIAL_UPLOAD", result
+        assert result["unknown_status"] is True
+        # The batch went out, so it counts and is named.
+        assert result["uploaded_total"] == 3
+        assert result["uncertain_lines"] == [2, 5]
+        assert result["resume_from_line"] == 5
+        assert "could not be read" in result["error"]
+        # The message names the same lines and does not ask for a resend.
+        assert "3 row(s) in lines 2-4" in result["message"]
+        assert "from line 5" in result["message"]
+        assert preview_store.get_plan(preview["plan_id"]) is None
+
+    def test_a_bad_offset_row_is_reported_without_a_crash(
+        self, tmp_path, monkeypatch
+    ):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CALLS")
+        path = tmp_path / "phone.csv"
+        path.write_text(
+            "Parameters:TimeZone=+2500,,,,,\n"
+            + _CALL_HEADER
+            + "+14155550142,01.03.2026 12:00,My Action,01.03.2026 13:00,10,USD\n"
+        )
+        config = self._config(tmp_path)
+
+        result = conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+
+        # An unusable zone is a row-level problem, not a Python traceback.
+        assert "CSV parse failed" in result["error"]
+        details = " ".join(result["details"])
+        assert "Line 1" in details
+        assert "+2500" in details
+        assert "not a valid time zone" in details
+
+    def test_a_bad_offset_row_stops_an_ec_file_too(self, tmp_path, monkeypatch):
+        """The time-zone row is read by the shared reader, so both files see it."""
+        _patch_drafts_client(monkeypatch, "UPLOAD_CLICK_CONVERSIONS")
+        path = tmp_path / "ec.csv"
+        path.write_text(
+            "Parameters:TimeZone=+0270,,,,,,,\n"
+            + _EC_HEADER
+            + "\nuser@example.com,,Anna,Lena,My Action,01.03.2026 13:00,10,USD\n"
+        )
+        config = self._config(tmp_path)
+
+        result = conversion_actions.draft_upload_enhanced_conversions_for_leads(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+
+        assert "CSV parse failed" in result["error"]
+        assert "+0270" in " ".join(result["details"])
+
+    def test_an_iso_offset_with_a_colon_is_accepted(self, tmp_path, monkeypatch):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CALLS")
+        path = tmp_path / "phone.csv"
+        path.write_text(
+            "Parameters:TimeZone=+01:00,,,,,\n"
+            + _CALL_HEADER
+            + "+14155550142,01.03.2026 12:00,My Action,01.03.2026 13:00,10,USD\n"
+        )
+        config = self._config(tmp_path)
+
+        result = conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+        row = _stored_plan(result).apply_only_payload["rows"][0]
+
+        assert row["call_start_time"] == "2026-03-01 12:00:00+01:00"

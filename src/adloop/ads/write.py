@@ -2596,6 +2596,31 @@ def _extract_error_message(exc: Exception) -> str:
     return fallback if fallback else repr(exc)
 
 
+def _partial_upload_message(e: object) -> str:
+    """The human-readable half of a ``PARTIAL_UPLOAD`` answer.
+
+    The raw ``error`` and this message both reach the caller, so they must not
+    disagree about what is safe to do next. When a batch's fate is unknown the
+    message names exactly those CSV lines, tells the caller to check the
+    conversion action first, and points the resume hint *after* the batch —
+    pointing at its first line is what invites a duplicate upload.
+    """
+    if getattr(e, "unknown_status", False):
+        first, after = e.uncertain_lines
+        return (
+            f"{e.uncertain_rows} row(s) in lines {first}-{after - 1} may or may "
+            "not have been received: check the conversion action for them "
+            "first, then draft the remaining rows from line "
+            f"{e.resume_from_line}. The plan is no longer pending, so it cannot "
+            "resend anything."
+        )
+    return (
+        f"{e.uploaded_total} row(s) are uploaded; the plan is no longer "
+        "pending, so confirming it again cannot resend them. Resume the CSV at "
+        f"line {e.resume_from_line} and draft the rest as a new upload."
+    )
+
+
 def confirm_and_apply(
     config: AdLoopConfig,
     *,
@@ -2838,6 +2863,11 @@ def confirm_and_apply(
                 error=error_message,
             )
             remove_plan(plan.plan_id)
+            # The message repeats what the raw error says, in the terms the
+            # caller has to act on. For an unknown outcome the two must agree:
+            # the uncertain batch is checked first, and the resume line points
+            # after it, never at its first row.
+            message = _partial_upload_message(e)
             return {
                 "status": "PARTIAL_UPLOAD",
                 "plan_id": plan.plan_id,
@@ -2847,13 +2877,13 @@ def confirm_and_apply(
                 "batches": e.batches,
                 "resume_from_line": e.resume_from_line,
                 "unknown_status": e.unknown_status,
-                **({"row_errors": e.row_errors} if e.row_errors else {}),
-                "message": (
-                    f"{e.uploaded_total} row(s) are uploaded; the plan is no "
-                    "longer pending, so confirming it again cannot resend them. "
-                    f"Resume the CSV at line {e.resume_from_line} and draft the "
-                    "rest as a new upload."
+                **(
+                    {"uncertain_lines": e.uncertain_lines}
+                    if e.uncertain_lines
+                    else {}
                 ),
+                **({"row_errors": e.row_errors} if e.row_errors else {}),
+                "message": message,
             }
 
         log_mutation(

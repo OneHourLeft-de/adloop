@@ -755,6 +755,46 @@ def _parse_amount(value_cell: str, currency_cell: str) -> tuple[object, str, str
     return value, currency, ""
 
 
+def _valid_timezone(value: str) -> bool:
+    """Is this a time zone Google's template allows — an IANA id or ±HHMM?"""
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+
+    text = (value or "").strip()
+    if not text:
+        return False
+    if re.fullmatch(r"[+-]\d{2}:?\d{2}", text):
+        digits = text.replace(":", "")
+        hours, minutes = int(digits[1:3]), int(digits[3:5])
+        if hours > 14 or minutes > 59:
+            return False
+        try:
+            _tz((1 if digits[0] == "+" else -1) * timedelta(
+                hours=hours, minutes=minutes
+            ))
+        except ValueError:
+            return False
+        return True
+    try:
+        ZoneInfo(text)
+    except Exception:  # noqa: BLE001 — unknown id from the CSV
+        return False
+    return True
+
+
+def _tzinfo(value: str) -> object:
+    """Build the tzinfo for a value ``_valid_timezone`` accepted."""
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+
+    text = (value or "").strip()
+    if re.fullmatch(r"[+-]\d{2}:?\d{2}", text):
+        digits = text.replace(":", "")
+        offset = timedelta(hours=int(digits[1:3]), minutes=int(digits[3:5]))
+        return _tz((1 if digits[0] == "+" else -1) * offset)
+    return ZoneInfo(text)
+
+
 def _parse_timestamp(value: str, default_tz: str) -> tuple[str, str]:
     """Parse a CSV timestamp; returns ``(api_value, problem)``.
 
@@ -767,8 +807,7 @@ def _parse_timestamp(value: str, default_tz: str) -> tuple[str, str]:
     ``Parameters:TimeZone=…`` row for exactly that, and without one the row is
     refused instead of being uploaded against the server's idea of local time.
     """
-    from datetime import datetime, timedelta
-    from zoneinfo import ZoneInfo
+    from datetime import datetime
 
     raw = (value or "").strip()
     if not raw:
@@ -794,18 +833,9 @@ def _parse_timestamp(value: str, default_tz: str) -> tuple[str, str]:
                 "has no time zone — add a 'Parameters:TimeZone=…' row to the "
                 "CSV, or give the timestamp an offset"
             )
-        # Google's template allows an IANA id or an offset like "+0100".
-        if re.fullmatch(r"[+-]\d{4}", default_tz):
-            sign = 1 if default_tz[0] == "+" else -1
-            offset = timedelta(
-                hours=int(default_tz[1:3]), minutes=int(default_tz[3:5])
-            )
-            parsed = parsed.replace(tzinfo=_tz(sign * offset))
-        else:
-            try:
-                parsed = parsed.replace(tzinfo=ZoneInfo(default_tz))
-            except Exception:  # noqa: BLE001 — unknown zone from the CSV
-                return "", f"uses an unknown time zone ({default_tz})"
+        if not _valid_timezone(default_tz):
+            return "", f"uses an unknown time zone ({default_tz})"
+        parsed = parsed.replace(tzinfo=_tzinfo(default_tz))
 
     return parsed.isoformat(sep=" ", timespec="seconds"), ""
 
@@ -838,6 +868,14 @@ def _read_upload_csv(
     import csv
     from pathlib import Path
 
+    # Errors found while reading (an unreadable file, a bad time-zone row) ride
+    # along with the records: the caller reports them, and a non-empty list
+    # stops the parse.
+    errors: list[str] = []
+    # Google's template carries its time zone in a `Parameters:TimeZone=…` row,
+    # which is what timestamps without an offset are resolved against.
+    timezone = ""
+
     path = Path(csv_path).expanduser()
     if not path.is_file():
         return [], [f"CSV not found or not a regular file: {path}"], ""
@@ -854,9 +892,6 @@ def _read_upload_csv(
             "at most 2,000 rows per upload request anyway."
         ], ""
 
-    # Google's template carries its time zone in a `Parameters:TimeZone=…` row,
-    # which is what timestamps without an offset are resolved against.
-    timezone = ""
     try:
         with path.open("r", newline="", encoding="utf-8-sig") as handle:
             position = {"line": 0}
@@ -884,11 +919,20 @@ def _read_upload_csv(
                     continue
                 first = (record[0] or "").strip()
                 if first.startswith("Parameters:"):
-                    if not timezone:
-                        for part in first.split(":", 1)[1].split(";"):
-                            key, _, value = part.partition("=")
-                            if key.strip().lower() == "timezone" and value.strip():
-                                timezone = value.strip()
+                    for part in first.split(":", 1)[1].split(";"):
+                        key, _, value = part.partition("=")
+                        if key.strip().lower() != "timezone" or not value.strip():
+                            continue
+                        # Validated once, here: a bad row must not blow up per
+                        # timestamp, and an unknown zone leaves the file without
+                        # one, so offset-less values are refused individually.
+                        if _valid_timezone(value):
+                            timezone = timezone or value.strip()
+                        else:
+                            errors.append(
+                                f"Line {start_line}: Parameters:TimeZone="
+                                f"{value.strip()} is not a valid time zone"
+                            )
                     continue
                 if first.startswith("#"):
                     continue
@@ -900,7 +944,7 @@ def _read_upload_csv(
 
     if not records:
         return [], ["CSV is empty (no header row found)"], ""
-    return records, [], timezone
+    return records, errors, timezone
 
 
 def _column_map(
@@ -1278,6 +1322,8 @@ class PartialUploadError(RuntimeError):
         dry_run: bool,
         row_errors: list[dict] | None = None,
         unknown_status: bool = False,
+        uncertain_lines: list[int] | None = None,
+        uncertain_rows: int = 0,
     ) -> None:
         super().__init__(message)
         self.batches = batches
@@ -1288,6 +1334,13 @@ class PartialUploadError(RuntimeError):
         # A transport failure is not a rejection: the batch may have reached
         # Google, so the caller must not simply send it again.
         self.unknown_status = unknown_status
+        # [first, one-past-last] of the batch whose fate is unknown, so a caller
+        # can check exactly those rows instead of a bare "resume from" hint.
+        self.uncertain_lines = uncertain_lines or []
+        # How many rows went into that batch. Lines can carry comments or be
+        # non-contiguous, so the count is carried instead of derived from the
+        # line span.
+        self.uncertain_rows = uncertain_rows
 
 
 def _row_errors_from_failure(
@@ -1344,6 +1397,9 @@ def _failure_from(
     from adloop.ads.write import _extract_error_message
 
     rejected = isinstance(exc, (GoogleAdsException, ValidateOnlyFailure))
+    # A rejection is an answer: only a transport-level failure leaves the
+    # batch's fate open, and a dry run never sent anything.
+    unknown = (not rejected) and not dry_run
     detail = _extract_error_message(exc)
     failure = getattr(exc, "failure", None)
     batch_row_errors = (
@@ -1370,20 +1426,27 @@ def _failure_from(
     else:
         message = (
             f"Batch {index + 1} of {batch_total} (CSV lines {first_line}-"
-            f"{last_line}) failed with an unknown outcome: {detail} The request "
-            "may have been received before the failure surfaced, so treat these "
-            "rows as uploaded until you have checked the conversion action — "
-            f"{done} row(s) from earlier batches are definitely in."
+            f"{last_line}) failed with an unknown outcome: {detail} Those lines "
+            "may or may not have been received — check the conversion action "
+            "for them before anything else; do not resend them "
+            f"unconditionally. {done} row(s) from earlier batches are "
+            f"definitely in, and the remaining rows can be drafted from line "
+            f"{last_line + 1}."
         )
 
     return PartialUploadError(
         message,
         batches=ledger,
         uploaded_total=done,
-        resume_from_line=first_line,
+        # For an unknown outcome the line to resume from is the first line
+        # *after* the uncertain batch: the batch itself has to be checked
+        # first, so pointing at its first line would invite a duplicate.
+        resume_from_line=last_line + 1 if unknown else first_line,
         dry_run=dry_run,
         row_errors=row_errors + batch_row_errors,
-        unknown_status=(not rejected) and not dry_run,
+        unknown_status=unknown,
+        uncertain_lines=[first_line, last_line + 1] if unknown else [],
+        uncertain_rows=len(chunk) if unknown else 0,
     )
 
 
@@ -1482,14 +1545,17 @@ def _upload_in_batches(
             raise PartialUploadError(
                 f"Batch {index + 1} of {batch_total} (CSV lines "
                 f"{first_line}-{last_line}) was sent, but its result could not "
-                f"be read: {exc} Treat those rows as uploaded.",
+                f"be read: {exc} The rows may have been received — check the "
+                "conversion action before resending them.",
                 batches=ledger,
                 uploaded_total=sum(batch["uploaded"] for batch in ledger)
                 + len(payload),
-                resume_from_line=first_line,
+                resume_from_line=last_line + 1,
                 dry_run=dry_run,
                 row_errors=row_errors,
                 unknown_status=True,
+                uncertain_lines=[first_line, last_line + 1],
+                uncertain_rows=len(payload),
             ) from exc
 
     uploaded_total = sum(batch["uploaded"] for batch in ledger)
