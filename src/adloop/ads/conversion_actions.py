@@ -22,6 +22,7 @@ MUTATE_NOT_ALLOWED):
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from datetime import datetime, timezone as _tz
 from typing import TYPE_CHECKING
@@ -729,6 +730,31 @@ _TIMESTAMP_FORMATS = (
 )
 
 
+def _parse_amount(value_cell: str, currency_cell: str) -> tuple[object, str, str]:
+    """Validate a conversion value/currency pair; returns (value, currency, problem).
+
+    An empty cell stays empty: sending 0.0 would override the conversion
+    action's own default, and sending "USD" for a blank cell would override the
+    account currency. ``nan``/``inf``/negative values are refused instead of
+    being handed to the API.
+    """
+    raw_value = (value_cell or "").strip()
+    if raw_value:
+        try:
+            value = float(raw_value)
+        except ValueError:
+            return None, "", "invalid Conversion Value"
+        if not math.isfinite(value) or value < 0:
+            return None, "", "Conversion Value must be a finite number ≥ 0"
+    else:
+        value = None
+
+    currency = (currency_cell or "").strip().upper()
+    if currency and not re.fullmatch(r"[A-Z]{3}", currency):
+        return None, "", f"Conversion Currency must be a 3-letter ISO code, got {currency!r}"
+    return value, currency, ""
+
+
 def _parse_timestamp(value: str, default_tz: str) -> tuple[str, str]:
     """Parse a CSV timestamp; returns ``(api_value, problem)``.
 
@@ -912,11 +938,11 @@ def _parse_call_conversion_csv(
     now = datetime.now(_tz.utc)
     out: list[dict] = []
     for source_line, raw in records[1:]:
-        try:
-            value_str = raw[col["Conversion Value"]].strip()
-            value = float(value_str) if value_str else 0.0
-        except (ValueError, IndexError):
-            errors.append(f"Row {source_line}: invalid Conversion Value")
+        value, currency, problem = _parse_amount(
+            raw[col["Conversion Value"]], raw[col["Conversion Currency"]]
+        )
+        if problem:
+            errors.append(f"Row {source_line}: {problem}")
             continue
 
         call_start, problem = _parse_timestamp(raw[col["Call Start Time"]], timezone)
@@ -948,7 +974,7 @@ def _parse_call_conversion_csv(
             "conversion_name": raw[col["Conversion Name"]].strip(),
             "conversion_time": converted,
             "conversion_value": value,
-            "currency_code": (raw[col["Conversion Currency"]].strip().upper() or "USD"),
+            "currency_code": currency,
         })
     return out, errors
 
@@ -1072,7 +1098,14 @@ def draft_upload_call_conversions(
     rows = usable
 
     distinct_actions = sorted({r["conversion_name"] for r in rows})
-    total_value = sum(r["conversion_value"] for r in rows)
+    total_value = sum(
+        r["conversion_value"] for r in rows
+        if r["conversion_value"] is not None
+    )
+    rows_without_value = sum(
+        1 for r in rows if r["conversion_value"] is None
+    )
+    rows_without_currency = sum(1 for r in rows if not r["currency_code"])
 
     # Validate the action names against the account now, not after the upload
     # ran: a typo in the CSV should not cost a confirmed plan. The resource
@@ -1116,7 +1149,11 @@ def draft_upload_call_conversions(
         changes={
             "row_count": len(rows),
             "total_value": round(total_value, 2),
-            "currency_hint": rows[0]["currency_code"] if rows else "USD",
+            # Blank stays blank: the field is left unset so Google falls back to
+            # the conversion action's default instead of an invented currency.
+            "currency_hint": rows[0]["currency_code"],
+            "rows_without_value": rows_without_value,
+            "rows_without_currency": rows_without_currency,
             "skipped_count": len(skipped),
             "skipped_rows": skipped,
             "distinct_conversion_actions": distinct_actions,
@@ -1354,8 +1391,10 @@ def _apply_upload_call_conversions(
             cc.call_start_date_time = r["call_start_time"]
             cc.conversion_action = action_resources[r["conversion_name"]]
             cc.conversion_date_time = r["conversion_time"]
-            cc.conversion_value = float(r["conversion_value"])
-            cc.currency_code = r["currency_code"]
+            if r.get("conversion_value") is not None:
+                cc.conversion_value = float(r["conversion_value"])
+            if r.get("currency_code"):
+                cc.currency_code = r["currency_code"]
             _apply_consent(client, cc, consent)
             payload.append(cc)
         response = upload_service.upload_call_conversions(
@@ -1436,11 +1475,11 @@ def _parse_ec_for_leads_csv(
 
     out: list[dict] = []
     for source_line, raw in records[1:]:
-        try:
-            value_str = raw[col["Conversion Value"]].strip()
-            value = float(value_str) if value_str else 0.0
-        except (ValueError, IndexError):
-            errors.append(f"Row {source_line}: invalid Conversion Value")
+        value, currency, problem = _parse_amount(
+            raw[col["Conversion Value"]], raw[col["Conversion Currency"]]
+        )
+        if problem:
+            errors.append(f"Row {source_line}: {problem}")
             continue
         order_id = ""
         if "Order ID" in optional_col:
@@ -1499,9 +1538,7 @@ def _parse_ec_for_leads_csv(
             "conversion_name": raw[col["Conversion Name"]].strip(),
             "conversion_time": converted_time,
             "conversion_value": value,
-            "currency_code": (
-                raw[col["Conversion Currency"]].strip().upper() or "USD"
-            ),
+            "currency_code": currency,
             "order_id": order_id,
         })
     return out, errors
@@ -1676,7 +1713,14 @@ def draft_upload_enhanced_conversions_for_leads(
     rows = usable
 
     distinct_actions = sorted({r["conversion_name"] for r in rows})
-    total_value = sum(r["conversion_value"] for r in rows)
+    total_value = sum(
+        r["conversion_value"] for r in rows
+        if r["conversion_value"] is not None
+    )
+    rows_without_value = sum(
+        1 for r in rows if r["conversion_value"] is None
+    )
+    rows_without_currency = sum(1 for r in rows if not r["currency_code"])
 
     from adloop.ads.client import get_ads_client, normalize_customer_id
 
@@ -1760,7 +1804,11 @@ def draft_upload_enhanced_conversions_for_leads(
         changes={
             "row_count": len(rows),
             "total_value": round(total_value, 2),
-            "currency_hint": rows[0]["currency_code"] if rows else "USD",
+            # Blank stays blank: the field is left unset so Google falls back to
+            # the conversion action's default instead of an invented currency.
+            "currency_hint": rows[0]["currency_code"],
+            "rows_without_value": rows_without_value,
+            "rows_without_currency": rows_without_currency,
             "rows_with_email": with_email,
             "rows_with_phone": with_phone,
             "rows_with_order_id": with_order_id,
@@ -1829,8 +1877,10 @@ def _apply_upload_enhanced_conversions_for_leads(
             cc = client.get_type("ClickConversion")
             cc.conversion_action = action_resources[r["conversion_name"]]
             cc.conversion_date_time = r["conversion_time"]
-            cc.conversion_value = float(r["conversion_value"])
-            cc.currency_code = r["currency_code"]
+            if r.get("conversion_value") is not None:
+                cc.conversion_value = float(r["conversion_value"])
+            if r.get("currency_code"):
+                cc.currency_code = r["currency_code"]
             if r.get("order_id"):
                 cc.order_id = r["order_id"]
             _apply_consent(client, cc, consent)

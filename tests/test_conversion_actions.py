@@ -2883,3 +2883,90 @@ class TestTimestampsAndTimeZones:
         )
 
         assert "future" in " ".join(result["details"])
+
+
+class TestValueAndCurrencyAreOptional:
+    """A blank cell must stay blank — not become 0.0 or "USD"."""
+
+    def _call_draft(self, config, tmp_path, monkeypatch, row: str):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CALLS")
+        path = tmp_path / "phone.csv"
+        path.write_text(_CALL_HEADER + row + "\n")
+        return conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+
+    def test_an_empty_value_stays_unset(self, config, tmp_path, monkeypatch):
+        result = self._call_draft(
+            config, tmp_path, monkeypatch,
+            "+14155550142,2026-03-01T12:00:00Z,My Action,"
+            "2026-03-01T13:00:00Z,,USD",
+        )
+        plan = _stored_plan(result)
+
+        assert plan.apply_only_payload["rows"][0]["conversion_value"] is None
+        assert plan.changes["rows_without_value"] == 1
+        assert plan.changes["total_value"] == 0
+
+    def test_an_empty_currency_is_not_invented(self, config, tmp_path, monkeypatch):
+        result = self._call_draft(
+            config, tmp_path, monkeypatch,
+            "+14155550142,2026-03-01T12:00:00Z,My Action,"
+            "2026-03-01T13:00:00Z,10,",
+        )
+        plan = _stored_plan(result)
+
+        assert plan.apply_only_payload["rows"][0]["currency_code"] == ""
+        assert plan.changes["currency_hint"] == ""
+        assert plan.changes["rows_without_currency"] == 1
+
+    def test_the_applier_leaves_the_fields_alone_when_they_are_empty(
+        self, config, tmp_path, monkeypatch
+    ):
+        result = self._call_draft(
+            config, tmp_path, monkeypatch,
+            "+14155550142,2026-03-01T12:00:00Z,My Action,"
+            "2026-03-01T13:00:00Z,,",
+        )
+        plan = _stored_plan(result)
+
+        upload = _FakeUploadService(results_count=1)
+        client = _client_with(
+            upload_service=upload, ads_service=_EchoActionRows("UPLOAD_CALLS")
+        )
+        conversion_actions._apply_upload_call_conversions(
+            client, "1234567890", plan.apply_payload()
+        )
+
+        # Nothing was assigned, so the conversion action's own defaults apply.
+        assert upload.calls[0]["conversions"][0].conversion_value == 0.0
+        assert upload.calls[0]["conversions"][0].currency_code == ""
+
+    def test_non_finite_and_negative_values_are_refused(
+        self, config, tmp_path, monkeypatch
+    ):
+        for bad in ("nan", "inf", "-5"):
+            result = self._call_draft(
+                config, tmp_path, monkeypatch,
+                "+14155550142,2026-03-01T12:00:00Z,My Action,"
+                f"2026-03-01T13:00:00Z,{bad},USD",
+            )
+            assert "CSV parse failed" in result["error"], bad
+            assert "finite number" in " ".join(result["details"]), bad
+
+    def test_the_currency_must_be_a_three_letter_code(
+        self, config, tmp_path, monkeypatch
+    ):
+        good = self._call_draft(
+            config, tmp_path, monkeypatch,
+            "+14155550142,2026-03-01T12:00:00Z,My Action,"
+            "2026-03-01T13:00:00Z,10,usd",
+        )
+        assert _stored_plan(good).apply_only_payload["rows"][0]["currency_code"] == "USD"
+
+        bad = self._call_draft(
+            config, tmp_path, monkeypatch,
+            "+14155550142,2026-03-01T12:00:00Z,My Action,"
+            "2026-03-01T13:00:00Z,10,US",
+        )
+        assert "3-letter ISO code" in " ".join(bad["details"])
