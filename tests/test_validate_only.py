@@ -47,7 +47,7 @@ class FakeService:
     def __getattr__(self, attr):
         if attr.endswith("_path"):
             return lambda *parts: "/".join(str(p) for p in parts)
-        if attr.startswith("mutate"):
+        if attr.startswith("mutate") or attr.startswith("upload"):
             def mutate(request=None, **kwargs):
                 self._client.calls.append((self._name, attr, request))
                 if self._client.reject:
@@ -70,6 +70,8 @@ class FakeAdsClient:
     def get_type(self, name):
         if name == "MutateGoogleAdsRequest":
             return FakeRequest("mutate_operations")
+        if name.startswith("Upload"):
+            return FakeRequest("conversions")
         if name.endswith("Request"):
             return FakeRequest("operations")
         return Bag()
@@ -199,3 +201,48 @@ def test_a_rejected_dry_run_fails_and_keeps_two_phase_closed(tmp_path, real_vali
     assert real["status"] == "DRY_RUN_REQUIRED"
     # Nothing but the one validate-only attempt ever reached the client.
     assert all(request.validate_only for _, _, request in fake.calls)
+
+
+def test_asset_dry_runs_read_their_own_result_field(tmp_path, real_validation):
+    """Asset applies read asset_result / campaign_asset_result, not
+    campaign_result; the placeholder must answer whichever they read."""
+    fake = FakeAdsClient()
+    real_validation(fake)
+    plan = ChangePlan(
+        operation="create_callouts",
+        entity_type="campaign_asset",
+        customer_id="1234567890",
+        changes={"campaign_id": "42", "callouts": ["Free shipping", "24/7 support"]},
+    )
+    store_plan(plan)
+
+    result = write.confirm_and_apply(_config(tmp_path), plan_id=plan.plan_id, dry_run=True)
+
+    assert result["status"] == "DRY_RUN_SUCCESS", result
+    assert result["checks"]["validated_calls"] >= 1
+    assert all(request.validate_only for _, _, request in fake.calls)
+
+
+def test_methods_without_a_validate_only_mode_are_refused():
+    fake = FakeAdsClient()
+    client = ValidateOnlyClient(fake)
+
+    with pytest.raises(ValidateOnlyFailure, match="no validate-only mode"):
+        client.get_service("KeywordPlanIdeaService").generate_keyword_ideas
+
+    assert fake.calls == []
+
+
+def test_uploads_are_sent_validate_only():
+    fake = FakeAdsClient()
+    client = ValidateOnlyClient(fake)
+
+    client.get_service("ConversionUploadService").upload_click_conversions(
+        customer_id="123", conversions=[Bag(), Bag()], partial_failure=True,
+    )
+
+    [(service, method, request)] = fake.calls
+    assert method == "upload_click_conversions"
+    assert request.validate_only is True
+    assert len(request.conversions) == 2
+    assert client.validated_calls == 1

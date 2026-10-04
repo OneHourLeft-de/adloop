@@ -10,6 +10,11 @@ Validate-only responses carry no results, so each validated call answers the
 apply code with placeholder resource names. A later call that references one
 (a plan whose second step uses what the first would have created) cannot be
 validated meaningfully; it is skipped and counted instead of sent.
+
+The wrapper fails closed: only path helpers, reads, ``mutate*`` and
+``upload*`` calls (both sent validate-only) reach the real service. Any other
+method raises, so a write path added later cannot slip past a dry run and
+change an account for real.
 """
 
 from __future__ import annotations
@@ -18,7 +23,8 @@ from types import SimpleNamespace
 
 PLACEHOLDER = "adloop-validate-only"
 
-_RESPONSE_FIELD_FOR_SERVICE = "campaign_result"
+# Methods that never change an account and may run for real in a dry run.
+_READ_METHODS = frozenset({"search", "search_stream"})
 
 
 class ValidateOnlyFailure(Exception):
@@ -52,9 +58,14 @@ class _ValidateOnlyService:
         self._service = service
 
     def __getattr__(self, attr: str) -> object:
+        if attr in _READ_METHODS or attr.endswith("_path") or attr.startswith("parse_"):
+            return getattr(self._service, attr)
+        if not (attr.startswith("mutate") or attr.startswith("upload")):
+            raise ValidateOnlyFailure(
+                f"{self._name}.{attr} has no validate-only mode, so a dry run "
+                "cannot check it without changing the account. Refusing."
+            )
         target = getattr(self._service, attr)
-        if not attr.startswith("mutate"):
-            return target
 
         def validate(request: object = None, **kwargs: object) -> object:
             if request is None:
@@ -78,35 +89,51 @@ class _ValidateOnlyService:
     def _build_request(self, method: str, kwargs: dict) -> object:
         request = self._owner._client.get_type(_request_type(self._name, method))
         for key, value in kwargs.items():
-            if key in ("operations", "mutate_operations"):
+            if key in _LIST_FIELDS:
                 getattr(request, key).extend(value)
             else:
                 setattr(request, key, value)
         return request
 
 
+_LIST_FIELDS = ("operations", "mutate_operations", "conversions")
+
+
 def _request_type(service_name: str, method: str) -> str:
-    """``mutate_ad_group_criteria`` -> ``MutateAdGroupCriteriaRequest``."""
+    """``mutate_ad_group_criteria`` -> ``MutateAdGroupCriteriaRequest``,
+    ``upload_click_conversions`` -> ``UploadClickConversionsRequest``."""
     if method == "mutate":
         return "Mutate" + service_name.removesuffix("Service") + "Request"
-    words = method.removeprefix("mutate_").split("_")
-    return "Mutate" + "".join(word.capitalize() for word in words) + "Request"
+    verb, _, rest = method.partition("_")
+    return verb.capitalize() + "".join(word.capitalize() for word in rest.split("_")) + "Request"
 
 
 def _operations_of(request: object) -> object:
-    if hasattr(request, "mutate_operations"):
-        return request.mutate_operations
-    return getattr(request, "operations", [])
+    for field in _LIST_FIELDS:
+        if hasattr(request, field):
+            return getattr(request, field)
+    return []
+
+
+class _PlaceholderResult:
+    """A MutateOperationResponse stand-in: every ``*_result`` field
+    (``asset_result``, ``campaign_asset_result``, ...) carries the placeholder,
+    whichever one the apply code reads."""
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def __getattr__(self, attr: str) -> object:
+        if attr.endswith("_result"):
+            return SimpleNamespace(resource_name=self._name)
+        raise AttributeError(attr)
 
 
 def _placeholder_response(customer_id: str, count: int, googleads_mutate: bool) -> object:
     names = [f"customers/{customer_id}/{PLACEHOLDER}/{i}" for i in range(count)]
     if googleads_mutate:
         return SimpleNamespace(
-            mutate_operation_responses=[
-                SimpleNamespace(**{_RESPONSE_FIELD_FOR_SERVICE: SimpleNamespace(resource_name=n)})
-                for n in names
-            ],
+            mutate_operation_responses=[_PlaceholderResult(n) for n in names],
             partial_failure_error=None,
         )
     return SimpleNamespace(
