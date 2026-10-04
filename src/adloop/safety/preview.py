@@ -26,6 +26,28 @@ class ChangePlan:
     # from before the field existed still load) or "reddit".
     platform: str = ""
 
+    # Payload the applier needs but a preview must never show: an upload's rows
+    # (the caller id cannot be hashed, so call uploads carry raw phone numbers),
+    # or a row blob too bulky to be useful in a model's context. It is a
+    # separate field rather than a key inside ``changes`` so that "what may be
+    # shown" is decided in one place by construction, not by filtering each
+    # surface — the previous attempt at that filtering is exactly what let raw
+    # numbers reach a preview.
+    #
+    # A plan store must round-trip this field; a store that drops it makes the
+    # applier refuse loudly instead of uploading nothing quietly.
+    apply_only_payload: dict[str, Any] = field(default_factory=dict)
+
+    def apply_payload(self) -> dict[str, Any]:
+        """What the applier gets: ``changes`` with the apply-only payload merged in.
+
+        Keys of ``changes`` win on collision — the apply-only payload is the
+        data the summary in ``changes`` describes, never the other way round.
+        """
+        payload = dict(self.apply_only_payload)
+        payload.update(self.changes)
+        return payload
+
     def to_preview(self) -> dict[str, Any]:
         """Format as a human-readable preview dict for the AI to present."""
         return {

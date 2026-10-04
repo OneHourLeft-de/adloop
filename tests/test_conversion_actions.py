@@ -947,14 +947,21 @@ class TestDraftUploadCallConversions:
             assert "***" in s["caller_id"]
             assert s["caller_id"] != "+15555550142"
 
-    def test_plan_rows_keep_raw_caller_id(self, config, tmp_path):
-        # Rows in the plan MUST keep the raw caller_id (apply needs it).
+    def test_raw_rows_live_outside_plan_changes(self, config, tmp_path):
+        """The applier needs the raw caller_id; `changes` must never carry it.
+
+        ``changes`` is what a preview and the dry-run response return, so the
+        rows go into ``apply_only_payload`` — one field, one decision.
+        """
         path = self._write(tmp_path)
         result = conversion_actions.draft_upload_call_conversions(
             config, customer_id="1234567890", csv_path=path,
         )
         plan = _stored_plan(result)
-        assert plan.changes["rows"][0]["caller_id"] == "+15555550142"
+        assert plan.apply_only_payload["rows"][0]["caller_id"] == "+15555550142"
+        assert "rows" not in plan.changes
+        assert "+15555550142" not in repr(plan.changes)
+        assert "+15555550142" not in repr(plan.to_preview())
 
     def test_consent_stored_in_plan(self, config, tmp_path):
         path = self._write(tmp_path)
@@ -1230,8 +1237,9 @@ class TestDraftUploadEcForLeads:
         assert "user@example.com" not in blob
         assert "+15555550142" not in blob
         assert "Test" not in blob and "User" not in blob
-        # But the hashes ARE present in the frozen rows.
-        assert plan.changes["rows"][0]["email_sha256"] == _EMAIL_HASH
+        # The hashed rows are apply-only payload, not part of the summary.
+        assert "rows" not in plan.changes
+        assert plan.apply_only_payload["rows"][0]["email_sha256"] == _EMAIL_HASH
 
     def test_sample_rows_truncate_hashes(self, config, tmp_path):
         path = self._write(tmp_path)
@@ -1440,69 +1448,77 @@ class TestApplyUploadEcForLeads:
 # ---------------------------------------------------------------------------
 
 
-class TestAuditRedaction:
-    def test_call_conversion_caller_id_redacted_in_audit(self):
-        changes = {
-            "row_count": 1,
-            "rows": [{
-                "caller_id": "+15555550142",
-                "call_start_time": "2026-03-01 12:00:00+00:00",
-                "conversion_name": "A",
-                "conversion_time": "2026-03-01 13:00:00+00:00",
-                "conversion_value": 250.0,
-                "currency_code": "USD",
-            }],
-        }
-        redacted = write._redact_changes_for_audit(
-            "upload_call_conversions", changes
-        )
-        blob = repr(redacted)
-        assert "+15555550142" not in blob
-        assert "+155***0142" in blob
-        # Original object is NOT mutated.
-        assert changes["rows"][0]["caller_id"] == "+15555550142"
+class TestPiiNeverReachesAPreviewSurface:
+    """Raw caller ids live in ``apply_only_payload``; nothing else may see them.
 
-    def test_ec_rows_dropped_from_audit(self):
-        changes = {
-            "row_count": 1,
-            "rows_with_email": 1,
-            "rows": [{
-                "email_sha256": _EMAIL_HASH,
-                "phone_sha256": _PHONE_HASH,
-                "first_name_sha256": _FIRST_HASH,
-                "last_name_sha256": _LAST_HASH,
-                "conversion_name": "Job",
-                "conversion_time": "2026-03-01 12:00:00+00:00",
-                "conversion_value": 500.0,
-                "currency_code": "USD",
-                "order_id": "",
-            }],
-        }
-        redacted = write._redact_changes_for_audit(
-            "upload_enhanced_conversions_for_leads", changes
-        )
-        assert "rows" not in redacted
-        assert "rows_redacted" in redacted
-        # Summary counters survive.
-        assert redacted["rows_with_email"] == 1
-        # Original object is NOT mutated.
-        assert "rows" in changes
+    ``plan.changes`` is what ``to_preview()`` and the dry-run response return,
+    which is why the rows had to leave it entirely — redacting each surface
+    was the approach that let the raw number through in the first place.
+    """
 
-    def test_non_upload_ops_pass_through(self):
-        changes = {"campaign_name": "X"}
-        assert (
-            write._redact_changes_for_audit("create_campaign", changes)
-            is changes
+    def _upload_plan(self, changes_rows: list[dict], **extra) -> object:
+        from adloop.safety.preview import ChangePlan
+
+        changes = {"row_count": len(changes_rows), "total_value": 250.0}
+        changes.update(extra)
+        return ChangePlan(
+            operation="upload_call_conversions",
+            entity_type="call_conversion_batch",
+            entity_id=str(len(changes_rows)),
+            customer_id="1234567890",
+            changes=changes,
+            apply_only_payload={"rows": changes_rows},
         )
+
+    def _row(self) -> dict:
+        return {
+            "caller_id": "+15555550142",
+            "call_start_time": "2026-03-01 12:00:00+00:00",
+            "conversion_name": "A",
+            "conversion_time": "2026-03-01 13:00:00+00:00",
+            "conversion_value": 250.0,
+            "currency_code": "USD",
+        }
+
+    def test_preview_and_apply_payload_are_disjoint(self):
+        plan = self._upload_plan([self._row()])
+
+        assert "+15555550142" not in repr(plan.to_preview())
+        assert "+15555550142" not in repr(plan.changes)
+        # …and the applier still gets what it needs.
+        assert plan.apply_payload()["rows"][0]["caller_id"] == "+15555550142"
+
+    def test_changes_win_over_apply_only_payload_on_collision(self):
+        plan = self._upload_plan([self._row()], total_value=999.0)
+
+        assert plan.apply_payload()["total_value"] == 999.0
+
+    def test_a_store_that_round_trips_the_dataclass_keeps_the_rows(self):
+        """What kLOsk's persistent store has to support, pinned as a test."""
+        import dataclasses
+
+        from adloop.safety import preview as preview_store
+
+        plan = self._upload_plan([self._row()])
+        preview_store.store_plan(plan)
+
+        # A JSON/dict-shaped round trip, the way a hosted store persists a plan.
+        stored = preview_store.get_plan(plan.plan_id)
+        revived = preview_store.ChangePlan(**dataclasses.asdict(stored))
+
+        assert revived.apply_payload()["rows"][0]["caller_id"] == "+15555550142"
+
+    def test_a_store_that_drops_the_field_fails_loudly(self, tmp_path):
+        """Silence is the dangerous outcome: an empty upload that reports success."""
+        from adloop.ads.conversion_actions import _apply_upload_call_conversions
+
+        with pytest.raises(RuntimeError, match="apply_only_payload"):
+            _apply_upload_call_conversions(
+                SimpleNamespace(), "1234567890", {"row_count": 3}
+            )
 
     def test_refused_two_phase_does_not_leak_caller_id(self, tmp_path):
-        """Two-phase apply (upstream commit 4e3d314) added a log_mutation site
-        that logs the refusal with result='refused_two_phase'. That site MUST
-        also run changes through _redact_changes_for_audit — otherwise a
-        refused call-conversion upload writes the raw caller_id to the audit
-        log. This exercises the full confirm_and_apply refusal path against the
-        real file audit sink and asserts the raw number never lands on disk.
-        """
+        """The refusal path logs ``plan.changes`` — which no longer holds rows."""
         from adloop.safety import audit
         from adloop.safety import preview as preview_store
 
@@ -1515,42 +1531,28 @@ class TestAuditRedaction:
                 log_file=str(log_path),
             ),
         )
-        plan = preview_store.ChangePlan(
-            operation="upload_call_conversions",
-            entity_type="conversion_upload",
-            entity_id="",
-            customer_id="1234567890",
-            changes={
-                "row_count": 1,
-                "rows": [{
-                    "caller_id": "+15555550142",
-                    "call_start_time": "2026-03-01 12:00:00+00:00",
-                    "conversion_name": "A",
-                    "conversion_time": "2026-03-01 13:00:00+00:00",
-                    "conversion_value": 250.0,
-                    "currency_code": "USD",
-                }],
-            },
+        preview_store.store_plan(self._upload_plan([self._row()]))
+
+        plan_id = [p for p in [None]]
+        from adloop.safety.preview import get_plan_store
+        store = get_plan_store()
+        # Retrieve the id through the store's own get() path
+        plan = preview_store.get_plan(
+            next(iter(store._plans.values())).plan_id  # noqa: SLF001 — in-memory store
         )
-        preview_store.store_plan(plan)
 
         prev_sink = audit.get_audit_sink()
         audit.set_audit_sink(audit.FileAuditSink())
         try:
-            resp = write.confirm_and_apply(
-                cfg, plan_id=plan.plan_id, dry_run=False
-            )
+            resp = write.confirm_and_apply(cfg, plan_id=plan.plan_id, dry_run=False)
         finally:
             audit.set_audit_sink(prev_sink)
 
-        # No dry run happened yet, so the real upload is refused.
         assert resp["status"] == "DRY_RUN_REQUIRED"
         logged = log_path.read_text()
         assert '"result": "refused_two_phase"' in logged
-        # The raw caller_id must NOT appear anywhere in the audit log.
         assert "+15555550142" not in logged
-        # The redacted form is what got logged instead.
-        assert "+155***0142" in logged
+        assert "rows" not in logged
 
 
 # ---------------------------------------------------------------------------
@@ -1591,11 +1593,46 @@ class TestUploadToolRegistration:
         )
         assert "csv_path" in required
 
-    def test_upload_dispatch_wired(self):
-        import inspect
-        src = inspect.getsource(write._execute_plan)
-        assert (
-            '"upload_call_conversions": _apply_upload_call_conversions'
-            in src
+    def test_upload_ops_are_wired_into_the_dispatch_table(self, monkeypatch):
+        """Behaviour, not source text: both operations reach their applier.
+
+        The old test grepped ``_execute_plan``'s source; the dispatch table
+        moved to ``_dispatch_ads_plan`` when the dry run became a validate-only
+        wrapper, so it passed for the wrong reason and then failed for the
+        wrong reason. Dispatching for real cannot drift like that.
+        """
+        import adloop.ads.conversion_actions as ca
+        from adloop.safety.preview import ChangePlan
+
+        seen: list[tuple[str, str, int]] = []
+
+        def _recorder(kind):
+            def _applier(client, cid, changes):
+                seen.append((kind, cid, int(changes.get("row_count") or 0)))
+                return {"applied": kind}
+            return _applier
+
+        monkeypatch.setattr(
+            ca, "_apply_upload_call_conversions", _recorder("call")
         )
-        assert "upload_enhanced_conversions_for_leads" in src
+        monkeypatch.setattr(
+            ca,
+            "_apply_upload_enhanced_conversions_for_leads",
+            _recorder("ec"),
+        )
+
+        for operation, kind in (
+            ("upload_call_conversions", "call"),
+            ("upload_enhanced_conversions_for_leads", "ec"),
+        ):
+            plan = ChangePlan(
+                operation=operation,
+                customer_id="1234567890",
+                changes={"row_count": 2},
+                apply_only_payload={"rows": [{"a": 1}, {"a": 2}]},
+            )
+            assert write._dispatch_ads_plan(object(), "1234567890", plan) == {
+                "applied": kind
+            }
+
+        assert seen == [("call", "1234567890", 2), ("ec", "1234567890", 2)]

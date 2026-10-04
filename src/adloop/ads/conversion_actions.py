@@ -907,8 +907,6 @@ def draft_upload_call_conversions(
             "partial_failure": bool(partial_failure),
             "consent": consent_norm,
             "parse_warnings": parse_errors,
-            # RAW caller_id lives here (apply needs it). REDACTED for audit.
-            "rows": frozen_rows,
             # Display sample uses REDACTED caller ids only.
             "sample_rows": [
                 {
@@ -920,6 +918,9 @@ def draft_upload_call_conversions(
                 for r in rows[:3]
             ],
         },
+        # RAW caller_id lives here (apply needs it, Google cannot hash it);
+        # a preview never shows `apply_only_payload`.
+        apply_only_payload={"rows": frozen_rows},
     )
     store_plan(plan)
     return plan.to_preview()
@@ -986,6 +987,16 @@ def _apply_upload_call_conversions(
     """
     rows = changes.get("rows") or []
     if not rows:
+        expected = int(changes.get("row_count") or 0)
+        if expected:
+            # row_count > 0 without the payload means the plan store dropped
+            # ``apply_only_payload``. Fail loudly; an empty upload that reports
+            # success is the one outcome nobody would notice.
+            raise RuntimeError(
+                f"This plan expects {expected} row(s) but carries none: the plan "
+                "store did not persist ChangePlan.apply_only_payload. Nothing "
+                "was uploaded — draft the upload again."
+            )
         return {"error": "Plan contained zero call-conversion rows"}
 
     distinct = sorted({r["conversion_name"] for r in rows})
@@ -1259,8 +1270,6 @@ def draft_upload_enhanced_conversions_for_leads(
             "consent": consent_norm,
             "parse_warnings": parse_errors,
             "dedup_warnings": dedup_warnings,
-            # Hashed-only rows — no raw PII. Apply builds protos from here.
-            "rows": frozen_rows,
             "sample_rows": [
                 {
                     "email_sha256": (r["email_sha256"][:16] + "...")
@@ -1275,6 +1284,9 @@ def draft_upload_enhanced_conversions_for_leads(
                 for r in rows[:3]
             ],
         },
+        # Hash-only rows, but still apply-only payload: the preview summarises
+        # them, and the row set is noise in a model's context.
+        apply_only_payload={"rows": frozen_rows},
     )
     store_plan(plan)
     return plan.to_preview()
@@ -1335,6 +1347,13 @@ def _apply_upload_enhanced_conversions_for_leads(
     """
     rows = changes.get("rows") or []
     if not rows:
+        expected = int(changes.get("row_count") or 0)
+        if expected:
+            raise RuntimeError(
+                f"This plan expects {expected} row(s) but carries none: the plan "
+                "store did not persist ChangePlan.apply_only_payload. Nothing "
+                "was uploaded — draft the upload again."
+            )
         return {"error": "Plan contained zero EC-for-leads rows"}
 
     distinct = sorted({r["conversion_name"] for r in rows})
