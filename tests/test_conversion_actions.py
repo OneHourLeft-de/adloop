@@ -2078,3 +2078,75 @@ class TestSkippedAndUnmatchableRows:
         assert not any(
             "only hashed names" in w for w in plan.changes["match_warnings"]
         )
+
+
+class TestUploadFlowThroughConfirmAndApply:
+    """Preview → dry run → apply, which is where the raw rows leaked.
+
+    The dry-run response returns ``plan.changes``, so a raw caller id in
+    ``changes`` reached the model even though the preview itself looked fine.
+    These tests walk the whole flow through the real entry point.
+    """
+
+    def _config(self, tmp_path, **safety):
+        # The apply half of the flow needs a config that does not force dry runs.
+        safety.setdefault("require_dry_run", False)
+        return AdLoopConfig(
+            ads=AdsConfig(customer_id="123-456-7890"),
+            safety=SafetyConfig(log_file=str(tmp_path / "audit.log"), **safety),
+        )
+
+    def _draft(self, config, tmp_path, monkeypatch):
+        client = _client_with(
+            upload_service=_FakeUploadService(results_count=1),
+            ads_service=_EchoActionRows("UPLOAD_CALLS"),
+        )
+        monkeypatch.setattr("adloop.ads.client.get_ads_client", lambda _cfg: client)
+        path = tmp_path / "phone.csv"
+        path.write_text(
+            _CALL_HEADER
+            + "+15555550142,2026-03-01T12:00:00Z,My Action,"
+              "2026-03-01T13:00:00Z,10,USD\n"
+        )
+        preview = conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+        return preview, client
+
+    def test_dry_run_response_and_audit_log_carry_no_raw_number(
+        self, tmp_path, monkeypatch
+    ):
+        config = self._config(tmp_path)
+        preview, _client = self._draft(config, tmp_path, monkeypatch)
+        assert "+15555550142" not in repr(preview)
+
+        # The dry run talks to Google in validate-only mode; that request is not
+        # what this test is about, so it is stubbed out.
+        monkeypatch.setattr(
+            write,
+            "_validate_with_google",
+            lambda _cfg, _plan: {"validated_calls": 1, "skipped_calls": 0},
+        )
+        dry = write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=True)
+
+        assert dry["status"] == "DRY_RUN_SUCCESS"
+        assert "+15555550142" not in repr(dry)
+        assert "+15555550142" not in (tmp_path / "audit.log").read_text()
+
+    def test_apply_uploads_the_raw_number_once_and_logs_none(
+        self, tmp_path, monkeypatch
+    ):
+        config = self._config(tmp_path)
+        preview, client = self._draft(config, tmp_path, monkeypatch)
+
+        applied = write.confirm_and_apply(
+            config, plan_id=preview["plan_id"], dry_run=False
+        )
+
+        assert applied["status"] == "APPLIED", applied
+        assert "+15555550142" not in repr(applied)
+        assert len(client._services["ConversionUploadService"].calls) == 1
+        # The upload itself must carry it — Google cannot match a hashed number.
+        sent = client._services["ConversionUploadService"].calls[0]["conversions"]
+        assert sent[0].caller_id == "+15555550142"
+        assert "+15555550142" not in (tmp_path / "audit.log").read_text()
