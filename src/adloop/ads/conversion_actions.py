@@ -625,47 +625,35 @@ def _normalize_name(name: str) -> str:
     return (name or "").strip().lower()
 
 
-def _normalize_phone_e164(phone: str) -> str:
-    """Best-effort E.164 normalization for a phone number.
+def _normalize_phone_e164(phone: str, default_region: str = "") -> str:
+    """E.164 for a phone number, or "" when the number is not usable.
 
-    Rules (deliberately conservative — Google requires E.164 for EC phone
-    hashing and CallConversion.caller_id):
-      * Strip spaces, hyphens, parens, dots.
-      * A leading "00" is the international-access prefix → replace with "+".
-      * A single leading domestic trunk "0" (common in EU national format,
-        e.g. UK "020 7946 0018") is dropped — but ONLY one zero, and ONLY
-        when there's no "+" already. We do NOT strip every leading zero.
-      * Italy is the notable exception: Italian fixed-line numbers KEEP their
-        leading 0 in E.164 (e.g. Rome "+39 06 …"). We can't reliably detect
-        country from a bare national number, so the safe, documented rule is:
-        if the number already carries a country code (starts with "+"), we
-        never touch interior digits. A bare Italian number passed without a
-        "+" can't be disambiguated here — callers should pass Italian numbers
-        in full "+39…" form. This keeps the common EU trunk-zero case correct
-        without corrupting Italy's retained-zero numbers that arrive as "+39…".
+    libphonenumber semantics, via ``phonenumbers`` (Google's own port): parse
+    with an optional default region, then require ``is_valid_number``. That is
+    what gets the common cases right — the German trunk marker in
+    ``+49 (0)89 123456``, an extension in ``+1 415 555 0100 ext 12``, and a
+    national ``0151 12345678`` that needs ``default_region="DE"`` to become
+    ``+4915112345678``. A hand-rolled normalizer got all three wrong, silently.
 
-    Returns the number with a leading "+" when we could infer one; otherwise
-    returns the cleaned digits unchanged (Google will reject a non-E.164
-    number, surfaced as a per-row failure rather than silently mangled).
+    ``default_region`` is the ISO country code assumed for numbers without a
+    country code. Without it such numbers cannot be resolved and return "".
+
+    Returns "" for anything unparseable or invalid, so the caller can report
+    the row instead of uploading a number Google cannot match.
     """
-    s = (phone or "").strip()
-    if not s:
+    import phonenumbers
+
+    raw = (phone or "").strip()
+    if not raw:
         return ""
-    has_plus = s.startswith("+")
-    digits = "".join(ch for ch in s if ch.isdigit())
-    if not digits:
+    region = (default_region or "").strip().upper() or None
+    try:
+        number = phonenumbers.parse(raw, region)
+    except phonenumbers.NumberParseException:
         return ""
-    if has_plus:
-        # Already carries a country code — trust it verbatim (this is the
-        # path that preserves Italy's retained leading zero, e.g. +3906…).
-        return "+" + digits
-    # "00" international access prefix → "+"
-    if digits.startswith("00"):
-        return "+" + digits[2:]
-    # Strip EXACTLY ONE domestic trunk zero (national dialing format).
-    if digits.startswith("0"):
-        return digits[1:]
-    return digits
+    if not phonenumbers.is_valid_number(number):
+        return ""
+    return phonenumbers.format_number(number, phonenumbers.PhoneNumberFormat.E164)
 
 
 def _gaql_escape(s: str) -> str:
@@ -854,7 +842,9 @@ def _column_map(
     return {name: columns.index(name) for name in expected}, []
 
 
-def _parse_call_conversion_csv(csv_path: str) -> tuple[list[dict], list[str]]:
+def _parse_call_conversion_csv(
+    csv_path: str, default_region: str = ""
+) -> tuple[list[dict], list[str]]:
     """Read the call-conversions CSV (local file) and normalize each row.
 
     Returns (rows, errors). Rows are dicts keyed by canonical column name; the
@@ -882,9 +872,11 @@ def _parse_call_conversion_csv(csv_path: str) -> tuple[list[dict], list[str]]:
         except (ValueError, IndexError):
             errors.append(f"Row {source_line}: invalid Conversion Value")
             continue
+        raw_caller = raw[col["Caller's Phone Number"]]
         out.append({
             "source_line": source_line,
-            "caller_id": _normalize_phone_e164(raw[col["Caller's Phone Number"]]),
+            "caller_was_given": bool((raw_caller or "").strip()),
+            "caller_id": _normalize_phone_e164(raw_caller, default_region),
             "call_start_time": _normalize_call_timestamp(raw[col["Call Start Time"]]),
             "conversion_name": raw[col["Conversion Name"]].strip(),
             "conversion_time": _normalize_call_timestamp(raw[col["Conversion Time"]]),
@@ -911,6 +903,7 @@ def draft_upload_call_conversions(
     *,
     customer_id: str = "",
     csv_path: str,
+    default_region: str = "",
     consent: dict | None = None,
 ) -> dict:
     """Draft an upload of call conversions from CSV — returns a PREVIEW.
@@ -965,7 +958,16 @@ def draft_upload_call_conversions(
     except ValueError as e:
         return {"error": str(e)}
 
-    rows, parse_errors = _parse_call_conversion_csv(csv_path)
+    default_region = (default_region or "").strip().upper()
+    if default_region and not re.fullmatch(r"[A-Z]{2}", default_region):
+        return {
+            "error": (
+                "default_region must be a two-letter ISO country code "
+                "(e.g. 'DE') or empty"
+            )
+        }
+
+    rows, parse_errors = _parse_call_conversion_csv(csv_path, default_region)
     if parse_errors and not rows:
         return {"error": "CSV parse failed", "details": parse_errors}
     if not rows:
@@ -983,16 +985,18 @@ def draft_upload_call_conversions(
         skipped.append({
             "row": row.get("source_line"),
             "reason": (
-                "caller_id is empty"
-                if not caller
-                else "caller_id is not E.164 (no leading '+'); Google rejects "
-                "such rows"
+                "caller_id is not a valid E.164 number — add a country code, "
+                "or pass default_region for national formats"
+                if row.get("caller_was_given")
+                else "caller_id is empty"
             ),
         })
     if not usable:
         return {
             "error": (
-                "No row carries a usable E.164 caller_id. Nothing was planned."
+                "No row carries a usable E.164 caller_id. Nothing was planned — "
+                "check the numbers, or pass default_region for national "
+                "formats."
             ),
             "skipped_rows": skipped,
         }
@@ -1334,7 +1338,9 @@ _OPTIONAL_EC_HEADERS = [
 ]
 
 
-def _parse_ec_for_leads_csv(csv_path: str) -> tuple[list[dict], list[str]]:
+def _parse_ec_for_leads_csv(
+    csv_path: str, default_region: str = ""
+) -> tuple[list[dict], list[str]]:
     """Parse the EC-for-Leads CSV (local file) and hash PII at parse time.
 
     Required columns: Email, Phone Number, First Name, Last Name,
@@ -1376,7 +1382,7 @@ def _parse_ec_for_leads_csv(csv_path: str) -> tuple[list[dict], list[str]]:
         # Normalize THEN hash. Raw values are discarded immediately.
         email_norm = _normalize_email(raw[col["Email"]])
         raw_phone = raw[col["Phone Number"]]
-        phone_norm = _normalize_phone_e164(raw_phone)
+        phone_norm = _normalize_phone_e164(raw_phone, default_region)
         # A phone that is not E.164 hashes to a value Google can never match —
         # sending it would only pad the payload. Keep the row (email/address
         # may still match) but drop the identifier and say so.
@@ -1464,10 +1470,11 @@ def _match_warnings(
         )
     if unusable_phones:
         warnings.append(
-            f"{len(unusable_phones)} row(s) carry a phone number that is not "
-            "E.164 (no leading '+'), so the hashed value cannot match. Those "
-            "rows are uploaded without the phone identifier; first affected "
-            f"rows: {unusable_phones[:5]}."
+            f"{len(unusable_phones)} row(s) carry a phone number that is not a "
+            "valid E.164 number, so the hashed value cannot match. Those rows "
+            "are uploaded without the phone identifier — add a country code, "
+            "or pass default_region for national formats; first affected rows: "
+            f"{unusable_phones[:5]}."
         )
     return warnings
 
@@ -1477,6 +1484,7 @@ def draft_upload_enhanced_conversions_for_leads(
     *,
     customer_id: str = "",
     csv_path: str,
+    default_region: str = "",
     consent: dict | None = None,
 ) -> dict:
     """Draft an Enhanced Conversions for Leads upload — returns PREVIEW.
@@ -1529,7 +1537,16 @@ def draft_upload_enhanced_conversions_for_leads(
     except ValueError as e:
         return {"error": str(e)}
 
-    rows, parse_errors = _parse_ec_for_leads_csv(csv_path)
+    default_region = (default_region or "").strip().upper()
+    if default_region and not re.fullmatch(r"[A-Z]{2}", default_region):
+        return {
+            "error": (
+                "default_region must be a two-letter ISO country code "
+                "(e.g. 'DE') or empty"
+            )
+        }
+
+    rows, parse_errors = _parse_ec_for_leads_csv(csv_path, default_region)
     if parse_errors and not rows:
         return {"error": "CSV parse failed", "details": parse_errors}
     if not rows:

@@ -606,7 +606,7 @@ class TestMCPRegistration:
 # Offline conversion uploads — helpers, hashing, redaction, GAQL escape
 # ===========================================================================
 #
-# Fixtures use only FAKE PII: emails user@example.com, phones +15555550142,
+# Fixtures use only FAKE PII: emails user@example.com, phones +14155550142,
 # names Test User, order ids ORD-001. Hash assertions are pinned to the
 # SHA-256 hex of those known fakes.
 
@@ -619,7 +619,7 @@ def _sha(s: str) -> str:
 
 # Known-fake canonical hashes (normalize THEN sha256).
 _EMAIL_HASH = _sha("user@example.com")
-_PHONE_HASH = _sha("+15555550142")
+_PHONE_HASH = _sha("+14155550142")
 _FIRST_HASH = _sha("test")
 _LAST_HASH = _sha("user")
 
@@ -634,7 +634,7 @@ class TestSha256Hashing:
 
     def test_phone_normalized_then_hashed(self):
         h = conversion_actions._sha256_hex(
-            conversion_actions._normalize_phone_e164("+1 (555) 555-0142")
+            conversion_actions._normalize_phone_e164("+1 415 555 0142")
         )
         assert h == _PHONE_HASH
 
@@ -651,42 +651,54 @@ class TestSha256Hashing:
 
 
 class TestNormalizePhoneE164:
-    def test_us_number_preserved(self):
+    """libphonenumber semantics via `phonenumbers` — not a hand-rolled dialect."""
+
+    def test_german_trunk_marker_is_handled(self):
+        # The "(0)" is standard in German exports; trusting anything that
+        # starts with "+" produced +49089123456, a number that never matches.
         assert (
-            conversion_actions._normalize_phone_e164("+1 (555) 555-0142")
-            == "+15555550142"
+            conversion_actions._normalize_phone_e164("+49 (0)89 123456")
+            == "+4989123456"
         )
 
-    def test_double_zero_international_prefix_becomes_plus(self):
+    def test_a_national_format_needs_a_default_region(self):
+        assert conversion_actions._normalize_phone_e164("0151 12345678") == ""
         assert (
-            conversion_actions._normalize_phone_e164("0044 20 7946 0018")
-            == "+442079460018"
+            conversion_actions._normalize_phone_e164("0151 12345678", "DE")
+            == "+4915112345678"
         )
-
-    def test_strips_exactly_one_domestic_trunk_zero(self):
-        # UK national format "020 …" -> the single leading 0 is dropped.
         assert (
-            conversion_actions._normalize_phone_e164("020 7946 0018")
-            == "2079460018"
+            conversion_actions._normalize_phone_e164("089 123456", "DE")
+            == "+4989123456"
         )
 
-    def test_does_not_strip_multiple_leading_zeros_as_trunk(self):
-        # A leading "00" is the international prefix, NOT two trunk zeros:
-        # only the "00"->"+" rule fires, no extra zero-stripping.
-        assert conversion_actions._normalize_phone_e164("0012025550000") == (
-            "+12025550000"
+    def test_international_prefix_and_italian_leading_zero(self):
+        # A leading "00" is an international access prefix, but which one it is
+        # depends on the region it was dialled from — hence the region here.
+        assert conversion_actions._normalize_phone_e164("0049 89 123456") == ""
+        assert (
+            conversion_actions._normalize_phone_e164("0049 89 123456", "DE")
+            == "+4989123456"
         )
-
-    def test_italy_leading_zero_preserved_when_plus_present(self):
-        # Italian fixed-line numbers KEEP the leading 0 in E.164.
+        # Italian fixed-line numbers keep their leading zero in E.164.
         assert (
             conversion_actions._normalize_phone_e164("+39 06 6982 1234")
             == "+390669821234"
         )
 
-    def test_empty(self):
-        assert conversion_actions._normalize_phone_e164("") == ""
-        assert conversion_actions._normalize_phone_e164("   ") == ""
+    def test_an_extension_is_not_appended_to_the_number(self):
+        assert (
+            conversion_actions._normalize_phone_e164("+1 415 555 0132 ext 12")
+            == "+14155550132"
+        )
+
+    def test_unusable_numbers_return_empty(self):
+        for raw in ("", "   ", "not a number", "+1 555 0100", "+49 12345"):
+            assert conversion_actions._normalize_phone_e164(raw) == "", raw
+
+    def test_a_region_name_instead_of_a_code_is_unusable(self):
+        # "Germany" is not a region code; the draft refuses that value outright.
+        assert conversion_actions._normalize_phone_e164("0151 12345678", "Germany") == ""
 
 
 class TestGaqlEscape:
@@ -720,8 +732,8 @@ class TestGaqlEscape:
 
 class TestRedactCallerId:
     def test_masks_middle(self):
-        assert conversion_actions._redact_caller_id("+15555550142") == (
-            "+155***0142"
+        assert conversion_actions._redact_caller_id("+14155550142") == (
+            "+141***0142"
         )
 
     def test_short_number_fully_masked(self):
@@ -908,13 +920,13 @@ class TestParseCallConversionCsv:
         p.write_text(
             "Parameters:TimeZone=America/Los_Angeles,,,,,\n"
             + _CALL_HEADER
-            + "+15555550142,2026-03-01T12:00:00Z,My Action,"
+            + "+14155550142,2026-03-01T12:00:00Z,My Action,"
             "2026-03-01T13:00:00Z,250.00,usd\n"
         )
         rows, errors = conversion_actions._parse_call_conversion_csv(str(p))
         assert errors == []
         assert len(rows) == 1
-        assert rows[0]["caller_id"] == "+15555550142"
+        assert rows[0]["caller_id"] == "+14155550142"
         assert rows[0]["call_start_time"] == "2026-03-01 12:00:00+00:00"
         assert rows[0]["currency_code"] == "USD"
 
@@ -923,7 +935,7 @@ class TestParseCallConversionCsv:
         p.write_text(
             "Caller's Phone Number,Conversion Name,Conversion Time,"
             "Conversion Value,Conversion Currency\n"
-            "+15555550142,X,2026-03-01T13:00:00Z,10,USD\n"
+            "+14155550142,X,2026-03-01T13:00:00Z,10,USD\n"
         )
         rows, errors = conversion_actions._parse_call_conversion_csv(str(p))
         assert rows == []
@@ -974,11 +986,11 @@ class TestDraftUploadCallConversions:
         p = tmp_path / "phone.csv"
         p.write_text(
             _CALL_HEADER
-            + "+15555550142,2026-03-01T12:00:00Z,A,"
+            + "+14155550142,2026-03-01T12:00:00Z,A,"
             "2026-03-01T13:00:00Z,250.00,USD\n"
-            "+15555550143,2026-03-02T12:00:00Z,A,"
+            "+14155550143,2026-03-02T12:00:00Z,A,"
             "2026-03-02T13:00:00Z,500.00,USD\n"
-            "+15555550144,2026-03-03T12:00:00Z,B,"
+            "+14155550144,2026-03-03T12:00:00Z,B,"
             "2026-03-03T13:00:00Z,75.00,USD\n"
         )
         return str(p)
@@ -1017,7 +1029,7 @@ class TestDraftUploadCallConversions:
         )
         for s in result["changes"]["sample_rows"]:
             assert "***" in s["caller_id"]
-            assert s["caller_id"] != "+15555550142"
+            assert s["caller_id"] != "+14155550142"
 
     def test_raw_rows_live_outside_plan_changes(self, config, tmp_path):
         """The applier needs the raw caller_id; `changes` must never carry it.
@@ -1030,10 +1042,10 @@ class TestDraftUploadCallConversions:
             config, customer_id="1234567890", csv_path=path,
         )
         plan = _stored_plan(result)
-        assert plan.apply_only_payload["rows"][0]["caller_id"] == "+15555550142"
+        assert plan.apply_only_payload["rows"][0]["caller_id"] == "+14155550142"
         assert "rows" not in plan.changes
-        assert "+15555550142" not in repr(plan.changes)
-        assert "+15555550142" not in repr(plan.to_preview())
+        assert "+14155550142" not in repr(plan.changes)
+        assert "+14155550142" not in repr(plan.to_preview())
 
     def test_a_wrong_action_type_is_refused_at_draft_time(
         self, config, tmp_path, monkeypatch
@@ -1098,7 +1110,7 @@ class TestApplyUploadCallConversions:
     def _changes(self, consent=None):
         rows = [
             {
-                "caller_id": "+15555550142",
+                "caller_id": "+14155550142",
                 "call_start_time": "2026-03-01 12:00:00+00:00",
                 "conversion_name": "My Action",
                 "conversion_time": "2026-03-01 13:00:00+00:00",
@@ -1106,7 +1118,7 @@ class TestApplyUploadCallConversions:
                 "currency_code": "USD",
             },
             {
-                "caller_id": "+15555550143",
+                "caller_id": "+14155550143",
                 "call_start_time": "2026-03-02 12:00:00+00:00",
                 "conversion_name": "My Action",
                 "conversion_time": "2026-03-02 13:00:00+00:00",
@@ -1138,7 +1150,7 @@ class TestApplyUploadCallConversions:
         assert result["success_count"] == 2
         assert result["failure_count"] == 0
         sent = upload.called_with["conversions"]
-        assert sent[0].caller_id == "+15555550142"
+        assert sent[0].caller_id == "+14155550142"
         assert sent[0].conversion_action == (
             "customers/1/conversionActions/777"
         )
@@ -1223,7 +1235,7 @@ class TestParseEcForLeadsCsvHashesPii:
         path = self._write(
             tmp_path,
             _EC_HEADER + "\n"
-            "User@Example.com,+1 (555) 555-0142,Test,User,My Action,"
+            "User@Example.com,+1 415 555 0142,Test,User,My Action,"
             "2026-03-01T12:00:00Z,250.00,USD\n",
         )
         rows, errors = conversion_actions._parse_ec_for_leads_csv(path)
@@ -1241,7 +1253,7 @@ class TestParseEcForLeadsCsvHashesPii:
         path = self._write(
             tmp_path,
             _EC_HEADER + "\n"
-            ",+15555550142,,,My Action,2026-03-01T12:00:00Z,200.00,USD\n",
+            ",+14155550142,,,My Action,2026-03-01T12:00:00Z,200.00,USD\n",
         )
         rows, _ = conversion_actions._parse_ec_for_leads_csv(path)
         assert rows[0]["email_sha256"] == ""
@@ -1252,7 +1264,7 @@ class TestParseEcForLeadsCsvHashesPii:
         path = self._write(
             tmp_path,
             _EC_HEADER + ",Order ID\n"
-            "user@example.com,+15555550142,Test,User,My Action,"
+            "user@example.com,+14155550142,Test,User,My Action,"
             "2026-03-01T12:00:00Z,250.00,USD,ORD-001\n",
         )
         rows, _ = conversion_actions._parse_ec_for_leads_csv(path)
@@ -1262,7 +1274,7 @@ class TestParseEcForLeadsCsvHashesPii:
         path = self._write(
             tmp_path,
             _EC_HEADER + "\n"
-            "user@example.com,+15555550142,Test,User,My Action,"
+            "user@example.com,+14155550142,Test,User,My Action,"
             "2026-03-01T12:00:00Z,250.00,USD\n",
         )
         rows, _ = conversion_actions._parse_ec_for_leads_csv(path)
@@ -1273,7 +1285,7 @@ class TestParseEcForLeadsCsvHashesPii:
             tmp_path,
             "Email,Phone Number,Conversion Name,Conversion Time,"
             "Conversion Value,Conversion Currency\n"
-            "user@example.com,+15555550142,X,2026-03-01T12:00:00Z,10,USD\n",
+            "user@example.com,+14155550142,X,2026-03-01T12:00:00Z,10,USD\n",
         )
         rows, errors = conversion_actions._parse_ec_for_leads_csv(path)
         assert rows == []
@@ -1287,9 +1299,9 @@ class TestDraftUploadEcForLeads:
 
     def _write(self, tmp_path, *, order_id=False):
         header = _EC_HEADER + (",Order ID" if order_id else "")
-        r1 = ("user@example.com,+15555550142,Test,User,Job Close,"
+        r1 = ("user@example.com,+14155550142,Test,User,Job Close,"
               "2026-03-01T12:00:00Z,500.00,USD")
-        r2 = (",+15555550143,,,Job Close,"
+        r2 = (",+14155550143,,,Job Close,"
               "2026-03-02T12:00:00Z,1500.00,USD")
         if order_id:
             r1 += ",ORD-001"
@@ -1324,7 +1336,7 @@ class TestDraftUploadEcForLeads:
         plan = _stored_plan(result)
         blob = repr(plan.changes)
         assert "user@example.com" not in blob
-        assert "+15555550142" not in blob
+        assert "+14155550142" not in blob
         assert "Test" not in blob and "User" not in blob
         # The hashed rows are apply-only payload, not part of the summary.
         assert "rows" not in plan.changes
@@ -1366,9 +1378,9 @@ class TestDraftUploadEcForLeads:
         p = tmp_path / "ec.csv"
         p.write_text(
             _EC_HEADER + ",Order ID\n"
-            "user@example.com,+15555550142,Test,User,Job Close,"
+            "user@example.com,+14155550142,Test,User,Job Close,"
             "2026-03-01T12:00:00Z,500.00,USD,ORD-001\n"
-            "user2@example.com,+15555550143,Test,User,Job Close,"
+            "user2@example.com,+14155550143,Test,User,Job Close,"
             "2026-03-02T12:00:00Z,1500.00,USD,\n"
         )
         result = (
@@ -1597,7 +1609,7 @@ class TestPiiNeverReachesAPreviewSurface:
 
     def _row(self) -> dict:
         return {
-            "caller_id": "+15555550142",
+            "caller_id": "+14155550142",
             "call_start_time": "2026-03-01 12:00:00+00:00",
             "conversion_name": "A",
             "conversion_time": "2026-03-01 13:00:00+00:00",
@@ -1608,10 +1620,10 @@ class TestPiiNeverReachesAPreviewSurface:
     def test_preview_and_apply_payload_are_disjoint(self):
         plan = self._upload_plan([self._row()])
 
-        assert "+15555550142" not in repr(plan.to_preview())
-        assert "+15555550142" not in repr(plan.changes)
+        assert "+14155550142" not in repr(plan.to_preview())
+        assert "+14155550142" not in repr(plan.changes)
         # …and the applier still gets what it needs.
-        assert plan.apply_payload()["rows"][0]["caller_id"] == "+15555550142"
+        assert plan.apply_payload()["rows"][0]["caller_id"] == "+14155550142"
 
     def test_changes_win_over_apply_only_payload_on_collision(self):
         plan = self._upload_plan([self._row()], total_value=999.0)
@@ -1631,7 +1643,7 @@ class TestPiiNeverReachesAPreviewSurface:
         stored = preview_store.get_plan(plan.plan_id)
         revived = preview_store.ChangePlan(**dataclasses.asdict(stored))
 
-        assert revived.apply_payload()["rows"][0]["caller_id"] == "+15555550142"
+        assert revived.apply_payload()["rows"][0]["caller_id"] == "+14155550142"
 
     def test_a_store_that_drops_the_field_fails_loudly(self, tmp_path):
         """Silence is the dangerous outcome: an empty upload that reports success."""
@@ -1670,7 +1682,7 @@ class TestPiiNeverReachesAPreviewSurface:
         logged = log_path.read_text()
         assert '"result": "refused_two_phase"' in logged
         # The logged plan is the summary: no rows, no caller id.
-        assert "+15555550142" not in logged
+        assert "+14155550142" not in logged
         assert '"row_count": 1' in logged
 
 
@@ -1818,7 +1830,7 @@ class TestCsvInputHardening:
             "\ufeffParameters:TimeZone=Europe/Berlin\n"
             "# comment\n"
             + _EC_HEADER + "\n"
-            + "user@example.com,+15555550142,Test,User,My Action,"
+            + "user@example.com,+14155550142,Test,User,My Action,"
               "2026-03-01T12:00:00Z,200.00,USD\n"
         )
         rows, errors = conversion_actions._parse_ec_for_leads_csv(
@@ -1837,7 +1849,7 @@ class TestUploadBatching:
             "conversion_actions": {"A": "customers/1/conversionActions/7"},
             "rows": [
                 {
-                    "caller_id": f"+1555555{i:04d}",
+                    "caller_id": f"+1415555{i:04d}",
                     "call_start_time": "2026-03-01 12:00:00+00:00",
                     "conversion_name": "A",
                     "conversion_time": "2026-03-01 13:00:00+00:00",
@@ -1950,7 +1962,7 @@ class TestUploadBatching:
         path = tmp_path / "phone.csv"
         path.write_text(
             _CALL_HEADER
-            + "+15555550142,2026-03-01T12:00:00Z,A,"
+            + "+14155550142,2026-03-01T12:00:00Z,A,"
               "2026-03-01T13:00:00Z,10,USD\n"
         )
         result = conversion_actions.draft_upload_call_conversions(
@@ -1976,7 +1988,7 @@ class TestSkippedAndUnmatchableRows:
         path = tmp_path / "phone.csv"
         path.write_text(
             _CALL_HEADER
-            + "+15555550142,2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,10,USD\n"
+            + "+14155550142,2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,10,USD\n"
             + ",2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,10,USD\n"
             + "02079460018,2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,10,USD\n"
         )
@@ -1991,7 +2003,8 @@ class TestSkippedAndUnmatchableRows:
         # Physical CSV lines: header is line 1, so the two broken rows are 3 and 4.
         assert [s["row"] for s in plan.changes["skipped_rows"]] == [3, 4]
         assert "empty" in plan.changes["skipped_rows"][0]["reason"]
-        assert "E.164" in plan.changes["skipped_rows"][1]["reason"]
+        assert "valid E.164" in plan.changes["skipped_rows"][1]["reason"]
+        assert "default_region" in plan.changes["skipped_rows"][1]["reason"]
         assert len(plan.apply_only_payload["rows"]) == 1
 
     def test_a_csv_of_only_unusable_call_rows_plans_nothing(
@@ -2016,7 +2029,7 @@ class TestSkippedAndUnmatchableRows:
         path = tmp_path / "leads.csv"
         path.write_text(
             _EC_HEADER + "\n"
-            + "user@example.com,+15555550142,Test,User,A,"
+            + "user@example.com,+14155550142,Test,User,A,"
               "2026-03-01T12:00:00Z,10,USD\n"
             + ",,,,A,2026-03-01T12:00:00Z,10,USD\n"
         )
@@ -2145,8 +2158,8 @@ class TestSkippedAndUnmatchableRows:
         assert "country code and postal code" in result["skipped_rows"][0]["reason"]
 
     def test_a_non_e164_phone_drops_the_identifier_and_warns(self, config, tmp_path, monkeypatch):
-        _patch_drafts_client(monkeypatch, "UPLOAD_CLICKS")
         """The row survives on its email; only the unusable phone is dropped."""
+        _patch_drafts_client(monkeypatch, "UPLOAD_CLICKS")
         path = tmp_path / "leads.csv"
         path.write_text(
             _EC_HEADER + "\n"
@@ -2162,7 +2175,7 @@ class TestSkippedAndUnmatchableRows:
         row = plan.apply_only_payload["rows"][0]
         assert row["phone_sha256"] == ""           # not a matchable hash
         assert row["email_sha256"]                 # but the row is still useful
-        assert any("not E.164" in w for w in plan.changes["match_warnings"])
+        assert any("not a valid E.164" in w for w in plan.changes["match_warnings"])
 
     def test_a_row_with_only_an_unusable_phone_is_skipped(self, config, tmp_path, monkeypatch):
         _patch_drafts_client(monkeypatch, "UPLOAD_CLICKS")
@@ -2263,7 +2276,7 @@ class TestUploadFlowThroughConfirmAndApply:
         path = tmp_path / "phone.csv"
         path.write_text(
             _CALL_HEADER
-            + "+15555550142,2026-03-01T12:00:00Z,My Action,"
+            + "+14155550142,2026-03-01T12:00:00Z,My Action,"
               "2026-03-01T13:00:00Z,10,USD\n"
         )
         preview = conversion_actions.draft_upload_call_conversions(
@@ -2276,7 +2289,7 @@ class TestUploadFlowThroughConfirmAndApply:
     ):
         config = self._config(tmp_path)
         preview, _client = self._draft(config, tmp_path, monkeypatch)
-        assert "+15555550142" not in repr(preview)
+        assert "+14155550142" not in repr(preview)
 
         # The dry run talks to Google in validate-only mode; that request is not
         # what this test is about, so it is stubbed out.
@@ -2288,8 +2301,8 @@ class TestUploadFlowThroughConfirmAndApply:
         dry = write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=True)
 
         assert dry["status"] == "DRY_RUN_SUCCESS"
-        assert "+15555550142" not in repr(dry)
-        assert "+15555550142" not in (tmp_path / "audit.log").read_text()
+        assert "+14155550142" not in repr(dry)
+        assert "+14155550142" not in (tmp_path / "audit.log").read_text()
 
     def test_apply_uploads_the_raw_number_once_and_logs_none(
         self, tmp_path, monkeypatch
@@ -2302,12 +2315,12 @@ class TestUploadFlowThroughConfirmAndApply:
         )
 
         assert applied["status"] == "APPLIED", applied
-        assert "+15555550142" not in repr(applied)
+        assert "+14155550142" not in repr(applied)
         assert len(client._services["ConversionUploadService"].calls) == 1
         # The upload itself must carry it — Google cannot match a hashed number.
         sent = client._services["ConversionUploadService"].calls[0]["conversions"]
-        assert sent[0].caller_id == "+15555550142"
-        assert "+15555550142" not in (tmp_path / "audit.log").read_text()
+        assert sent[0].caller_id == "+14155550142"
+        assert "+14155550142" not in (tmp_path / "audit.log").read_text()
 
 
 class TestDryRunUsesValidateOnly:
@@ -2346,7 +2359,7 @@ class TestDryRunUsesValidateOnly:
         path = tmp_path / "phone.csv"
         path.write_text(
             _CALL_HEADER
-            + "+15555550142,2026-03-01T12:00:00Z,My Action,"
+            + "+14155550142,2026-03-01T12:00:00Z,My Action,"
               "2026-03-01T13:00:00Z,10,USD\n"
         )
         preview = conversion_actions.draft_upload_call_conversions(
@@ -2379,7 +2392,7 @@ class TestDryRunUsesValidateOnly:
         path = tmp_path / "leads.csv"
         path.write_text(
             _EC_HEADER + "\n"
-            + "user@example.com,+15555550142,Test,User,Job Close,"
+            + "user@example.com,+14155550142,Test,User,Job Close,"
               "2026-03-01T12:00:00Z,500.00,USD\n"
         )
         preview = conversion_actions.draft_upload_enhanced_conversions_for_leads(
@@ -2456,7 +2469,7 @@ class TestPartialUploadRetiresThePlan:
         monkeypatch.setattr("adloop.ads.client.get_ads_client", lambda _cfg: client)
         path = tmp_path / "phone.csv"
         body = "".join(
-            f"+1555555{i:04d},2026-03-01T12:00:00Z,My Action,"
+            f"+1415555{i:04d},2026-03-01T12:00:00Z,My Action,"
             f"2026-03-01T13:00:00Z,10,USD\n"
             for i in range(rows)
         )
@@ -2552,7 +2565,7 @@ class TestSourceLinesSurviveCommentsAndSkips:
             "Parameters:TimeZone=Europe/Berlin\n"          # physical line 1
             "# comment\n"                                   # physical line 2
             + _CALL_HEADER                                  # physical line 3
-            + "+15555550142,2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,10,USD\n"  # 4
+            + "+14155550142,2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,10,USD\n"  # 4
             + ",2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,10,USD\n"              # 5
         )
 
@@ -2565,7 +2578,7 @@ class TestSourceLinesSurviveCommentsAndSkips:
         body = (
             "# comment\n"                                   # physical line 1
             + _CALL_HEADER                                  # physical line 2
-            + "+15555550142,2026-03-01T12:00:00Z,A,"
+            + "+14155550142,2026-03-01T12:00:00Z,A,"
               "2026-03-01T13:00:00Z,10,USD\n"               # physical line 3
         )
         result = self._draft(config, tmp_path, monkeypatch, body)
@@ -2590,9 +2603,9 @@ class TestRecordStartLine:
         path = tmp_path / "upload.csv"
         path.write_text(
             _CALL_HEADER  # line 1
-            + '+15555550142,2026-03-01T12:00:00Z,"Multi\nline",'
+            + '+14155550142,2026-03-01T12:00:00Z,"Multi\nline",'
               "2026-03-01T13:00:00Z,10,USD\n"      # starts line 2, ends line 3
-            + "+15555550143,2026-03-01T12:00:00Z,A,"
+            + "+14155550143,2026-03-01T12:00:00Z,A,"
               "2026-03-01T13:00:00Z,10,USD\n"      # line 4
         )
 
@@ -2605,7 +2618,7 @@ class TestRecordStartLine:
         path = tmp_path / "upload.csv"
         path.write_text(
             _CALL_HEADER
-            + "+15555550142,2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,10,USD\n"
+            + "+14155550142,2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,10,USD\n"
         )
 
         rows, _ = conversion_actions._parse_call_conversion_csv(str(path))
@@ -2662,7 +2675,7 @@ class TestAddressCountingMatchesWhatIsSent:
         result = self._draft(
             config, tmp_path, monkeypatch,
             _EC_HEADER + "\n"
-            + "user@example.com,+15555550142,Test,User,A,"
+            + "user@example.com,+14155550142,Test,User,A,"
               "2026-03-01T12:00:00Z,10,USD\n",
         )
         plan = _stored_plan(result)
@@ -2716,3 +2729,72 @@ class TestAddressCountingMatchesWhatIsSent:
             if uid.address_info.hashed_first_name
         ]
         assert len(addresses) == plan.changes["rows_with_address"] == 1
+
+
+class TestPhoneNormalizationInTheDraft:
+    """The upload tools take a `default_region` for national-format numbers."""
+
+    def _call_draft(self, config, tmp_path, monkeypatch, number: str, **kwargs):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CALLS")
+        path = tmp_path / "phone.csv"
+        path.write_text(
+            _CALL_HEADER
+            + f"{number},2026-03-01T12:00:00Z,My Action,"
+              "2026-03-01T13:00:00Z,10,USD\n"
+        )
+        return conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", csv_path=str(path), **kwargs
+        )
+
+    def test_a_national_number_becomes_usable_with_a_region(
+        self, config, tmp_path, monkeypatch
+    ):
+        result = self._call_draft(
+            config, tmp_path, monkeypatch, "0151 12345678", default_region="de"
+        )
+        plan = _stored_plan(result)
+
+        assert plan.changes["row_count"] == 1
+        assert plan.changes["skipped_count"] == 0
+        assert plan.apply_only_payload["rows"][0]["caller_id"] == "+4915112345678"
+
+    def test_without_the_region_the_same_number_is_reported(
+        self, config, tmp_path, monkeypatch
+    ):
+        result = self._call_draft(config, tmp_path, monkeypatch, "0151 12345678")
+
+        assert "Nothing was planned" in result["error"]
+        assert "default_region" in result["skipped_rows"][0]["reason"]
+
+    def test_the_german_trunk_marker_is_stripped(self, config, tmp_path, monkeypatch):
+        """`+49 (0)89 …` used to become +49089123456 — a number that never matches."""
+        result = self._call_draft(
+            config, tmp_path, monkeypatch, "+49 (0)89 123456"
+        )
+        plan = _stored_plan(result)
+
+        assert plan.apply_only_payload["rows"][0]["caller_id"] == "+4989123456"
+
+    def test_a_region_name_is_refused(self, config, tmp_path, monkeypatch):
+        result = self._call_draft(
+            config, tmp_path, monkeypatch, "0151 12345678",
+            default_region="Germany",
+        )
+
+        assert "two-letter ISO country code" in result["error"]
+
+    def test_ec_hashes_the_normalized_number(self, config, tmp_path, monkeypatch):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CLICKS")
+        path = tmp_path / "leads.csv"
+        path.write_text(
+            _EC_HEADER + "\n"
+            + "user@example.com,+49 (0)89 123456,Test,User,My Action,"
+              "2026-03-01T12:00:00Z,10,USD\n"
+        )
+
+        result = conversion_actions.draft_upload_enhanced_conversions_for_leads(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+        row = _stored_plan(result).apply_only_payload["rows"][0]
+
+        assert row["phone_sha256"] == conversion_actions._sha256_hex("+4989123456")

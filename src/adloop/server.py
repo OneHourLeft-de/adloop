@@ -3497,6 +3497,7 @@ def draft_remove_conversion_action(
 @_safe
 def draft_upload_call_conversions(
     csv_path: str,
+    default_region: str = "",
     consent: dict | None = None,
     customer_id: str = "",
 ) -> dict:
@@ -3518,8 +3519,11 @@ def draft_upload_call_conversions(
     redacted ids and counts, the audit log and `plan.changes` show neither.
     Apply uploads exactly what you previewed (no CSV re-read).
 
-    Rows without a usable E.164 caller id are skipped and reported in
-    `skipped_rows` instead of being uploaded to no effect.
+    Phone numbers are normalized with libphonenumber semantics: a number
+    without a country code needs ``default_region`` (e.g. "DE" for
+    "0151 12345678"), an extension is dropped, and the German trunk marker in
+    "+49 (0)89 …" is handled. Rows whose number stays unusable are skipped and
+    reported in `skipped_rows` instead of being uploaded to no effect.
 
     consent (GDPR/EEA): {"ad_user_data": "GRANTED"|"DENIED"|"UNSPECIFIED",
     "ad_personalization": ...}. Defaults to UNSPECIFIED. Call
@@ -3533,6 +3537,7 @@ def draft_upload_call_conversions(
         current_config(),
         customer_id=customer_id or current_config().ads.customer_id,
         csv_path=csv_path,
+        default_region=default_region,
         consent=consent,
     )
 
@@ -3541,6 +3546,7 @@ def draft_upload_call_conversions(
 @_safe
 def draft_upload_enhanced_conversions_for_leads(
     csv_path: str,
+    default_region: str = "",
     consent: dict | None = None,
     customer_id: str = "",
 ) -> dict:
@@ -3570,6 +3576,7 @@ def draft_upload_enhanced_conversions_for_leads(
         current_config(),
         customer_id=customer_id or current_config().ads.customer_id,
         csv_path=csv_path,
+        default_region=default_region,
         consent=consent,
     )
 
