@@ -48,6 +48,9 @@ You have access to AdLoop MCP tools that connect Google Ads, Reddit Ads and Goog
 | `get_demographic_targeting` | List current demographic criteria (age/gender/parental status/income) on an ad group or campaign — returns each criterion's `remove_id` for use with `remove_entity` | exactly one of `ad_group_id` or `campaign_id` |
 | `suggest_brands` | Resolve one brand name to the brands Google recognizes — brand ID, name, state, URLs. The ID is what brand criteria target, so resolve here before building any brand list | `brand_prefix` (required), `selected_brand_ids` (optional, IDs already picked) |
 | `check_brand_names` | Triage a shortlist of brand names at once: matched vs. unknown, plus each brand's ID | `brand_names` (required, max 25 per call) |
+| `get_brand_lists` | List brand lists (SharedSets of type BRANDS) before creating a new one — reuse beats duplication | (none) |
+| `get_brand_list_brands` | Contents of a brand list, with `entity_id` (the MID) and `criterion_id` (needed for removal) | `shared_set_id` (required) |
+| `get_brand_list_campaigns` | Which campaigns a brand list is attached to, and whether each attachment excludes (`role: excluded`) or targets (`role: targeted`) | `shared_set_id` (optional) |
 | `run_gaql` | Custom queries not covered by other tools | `query`, `format` (table/json/csv) |
 
 **Return format notes:**
@@ -205,6 +208,11 @@ Reddit is a second ad platform with its own connection (own OAuth app, no develo
 | `add_negative_locations` | Propose negative geo exclusions on a campaign (does NOT add) — exclude cities/regions while keeping broader positive targets | `campaign_id`, `geo_target_ids` (numeric geo target constant IDs) |
 | `draft_key_event` | Mark a GA4 event as a key event/conversion (does NOT apply) — closes the tracking loop after attribution_check finds an untracked conversion | `event_name`, `counting_method` (ONCE_PER_EVENT for purchases / ONCE_PER_SESSION for sign-ups), `property_id` (falls back to config) |
 | `propose_negative_keyword_list` | Draft a shared negative keyword list and attach it to a campaign (does NOT create) | `campaign_id`, `list_name`, keyword list, `match_type` |
+| `propose_brand_list` | Draft a brand list (SharedSet of type BRANDS) and optionally attach it. Only the Commercial KG MID can be written — resolve names first. | `list_name`, `brand_ids`, optional `campaign_ids`, optional `negative` (default True = exclusion) |
+| `add_to_brand_list` | Append brands to an EXISTING brand list | `shared_set_id`, `brand_ids` |
+| `remove_from_brand_list` | Remove brands from a list. SharedCriteria have no status, so this is a real removal (double confirmation). | `shared_set_id`, `criterion_ids` |
+| `attach_brand_list_to_campaigns` | Attach an existing brand list as `CampaignCriterion.brand_list` — NOT a `CampaignSharedSet`. `negative=True` excludes, `False` restricts. | `shared_set_id`, `campaign_ids`, optional `negative` |
+| `detach_brand_list_from_campaigns` | Remove the brand-list criterion from campaigns; the list itself stays. | `shared_set_id`, `campaign_ids` |
 | `add_to_negative_keyword_list` | Append keywords to an EXISTING shared negative keyword list (does NOT add) | `shared_set_id` (from `get_negative_keyword_lists`), keyword list, `match_type` |
 | `attach_shared_set_to_campaigns` | Attach an EXISTING shared set (e.g. shared negative keyword list) to one or more campaigns. Use after creating a campaign to inherit pre-built negatives. | `shared_set_id` (from `get_negative_keyword_lists`), `campaign_ids` list |
 | `detach_shared_set_from_campaigns` | Detach a shared set from one or more campaigns. Removes only the linkage; the shared set and its keywords stay intact. | `shared_set_id`, `campaign_ids` list |

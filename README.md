@@ -107,7 +107,12 @@ The best features come from real workflows. If you're using AdLoop and find your
 | `get_demographic_targeting` | List demographic criteria (age/gender/parental status/income) on an ad group or campaign |
 | `suggest_brands` | Resolve a brand name to the brands Google recognizes — brand ID, name, state, URLs |
 | `check_brand_names` | Check a shortlist of brand names against Google's brand knowledge graph (max 25 per call) |
+| `get_brand_lists` | List brand lists (SharedSets of type BRANDS) — ID, name, status, member count |
+| `get_brand_list_brands` | List the brands inside a list, with the Commercial KG MID and the criterion ID for removals |
+| `get_brand_list_campaigns` | Which campaigns a brand list is attached to, and whether each attachment excludes or targets |
 | `run_gaql` | Arbitrary GAQL queries for anything else |
+
+> **Brand lists** — a list is a `SharedSet` of type `BRANDS`; attaching it to a campaign is a `CampaignCriterion.brand_list` (`negative=true` excludes, `false` restricts), **not** a `CampaignSharedSet` like negative keyword lists. `remove_from_brand_list` and `detach_brand_list_from_campaigns` remove for real — `SharedCriterion` has no status field.
 
 > **Brand targeting** — brand criteria (brand lists, brand exclusions) target a brand's **Commercial Knowledge Graph ID**, not its display name. Use `suggest_brands` for a single name or `check_brand_names` for a shortlist to get the ID; `exact_match` marks a candidate whose name matches apart from case and punctuation, everything else is a Google suggestion.
 
@@ -223,6 +228,11 @@ All write operations follow a **draft → preview → confirm** workflow. Nothin
 | `draft_key_event` | Mark a GA4 event as a key event (conversion) — the fix for "fires but isn't tracked as a conversion" |
 | `draft_demographic_targeting` | Propose demographic criteria (age, gender, parental status, income) — exclusions by default |
 | `propose_negative_keyword_list` | Draft a shared negative keyword list (SharedSet) and attach it to a campaign — reusable across multiple campaigns |
+| `propose_brand_list` | Draft a brand list (SharedSet of type BRANDS) from Commercial KG MIDs and optionally attach it to campaigns — `negative=true` (default) excludes the brands, `false` restricts targeting to them |
+| `add_to_brand_list` | Draft adding brands to an existing brand list |
+| `remove_from_brand_list` | Draft removing brands from a list (SharedCriteria have no status — removal is the only way; asks for a second confirmation) |
+| `attach_brand_list_to_campaigns` | Draft attaching an existing brand list to campaigns as `CampaignCriterion.brand_list` |
+| `detach_brand_list_from_campaigns` | Draft detaching a brand list from campaigns (removes only the criterion, the list stays) |
 | `pause_entity` | Pause a campaign, ad group, ad, or keyword |
 | `enable_entity` | Re-enable a paused entity |
 | `remove_entity` | Permanently remove an entity (irreversible — prefers pause). Supports keywords, negative keywords, ads, ad groups, campaigns. |
