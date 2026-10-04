@@ -2475,7 +2475,11 @@ class TestPartialUploadRetiresThePlan:
         )
 
     def _plan(self, tmp_path, monkeypatch, *, rows=2501, fail_on_call=2):
-        upload = _FakeUploadService(results_count=10_000, fail_on_call=fail_on_call)
+        upload = _FakeUploadService(
+            results_count=10_000,
+            fail_on_call=fail_on_call,
+            fail_exception=_google_rejection("Invalid conversion action"),
+        )
         client = _client_with(
             upload_service=upload, ads_service=_EchoActionRows("UPLOAD_CALLS")
         )
@@ -3190,3 +3194,130 @@ class TestThePlanIsClaimedBeforeUploading:
         assert "may have been received" in result["error"]
         # The plan is retired either way: those rows cannot be sent again safely.
         assert preview_store.get_plan(preview["plan_id"]) is None
+        logged = (tmp_path / "audit.log").read_text()
+        assert '"result": "unknown_status"' in logged
+
+
+class TestClaimFallbackAndUnknownStatus:
+    """The store hook is a requirement, not a hard dependency."""
+
+    def _config(self, tmp_path):
+        return AdLoopConfig(
+            ads=AdsConfig(customer_id="123-456-7890"),
+            safety=SafetyConfig(
+                require_dry_run=False, log_file=str(tmp_path / "audit.log")
+            ),
+        )
+
+    def _draft(self, config, tmp_path, monkeypatch):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CALLS")
+        path = tmp_path / "phone.csv"
+        path.write_text(
+            _CALL_HEADER
+            + "+14155550142,2026-03-01T12:00:00Z,My Action,"
+              "2026-03-01T13:00:00Z,10,USD\n"
+        )
+        preview = conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+        upload = _FakeUploadService(results_count=1)
+        client = _client_with(
+            upload_service=upload, ads_service=_EchoActionRows("UPLOAD_CALLS")
+        )
+        monkeypatch.setattr("adloop.ads.client.get_ads_client", lambda _cfg: client)
+        return preview, upload
+
+    def test_a_store_without_claim_still_applies(self, tmp_path, monkeypatch):
+        """Only atomicity is lost — the hosted store without `claim` must work."""
+
+        class PlainStore:
+            def __init__(self):
+                self.plans = {}
+
+            def store(self, tenant, plan):
+                self.plans[(tenant, plan.plan_id)] = plan
+
+            def get(self, tenant, plan_id):
+                return self.plans.get((tenant, plan_id))
+
+            def remove(self, tenant, plan_id):
+                self.plans.pop((tenant, plan_id), None)
+
+        config = self._config(tmp_path)
+        store = PlainStore()
+        # The draft has to store into the plain store: it has no `claim`.
+        preview_store.set_plan_store(store)
+        try:
+            preview, upload = self._draft(config, tmp_path, monkeypatch)
+            result = write.confirm_and_apply(
+                config, plan_id=preview["plan_id"], dry_run=False
+            )
+        finally:
+            preview_store.set_plan_store(preview_store.InMemoryPlanStore())
+
+        assert result["status"] == "APPLIED", result
+        assert len(upload.calls) == 1
+        assert store.plans == {}
+
+    def test_a_plan_store_without_claim_is_not_fatal_for_other_operations(self):
+        """ `claim_plan` must not raise AttributeError for budgets and keywords. """
+
+        class PlainStore:
+            def __init__(self):
+                self.plans = {}
+
+            def store(self, tenant, plan):
+                self.plans[(tenant, plan.plan_id)] = plan
+
+            def get(self, tenant, plan_id):
+                return self.plans.get((tenant, plan_id))
+
+            def remove(self, tenant, plan_id):
+                self.plans.pop((tenant, plan_id), None)
+
+        store = PlainStore()
+        preview_store.set_plan_store(store)
+        try:
+            plan = preview_store.ChangePlan(operation="update_campaign")
+            store.store("local", plan)
+            assert preview_store.claim_plan(plan.plan_id) is plan
+            assert store.plans == {}
+        finally:
+            preview_store.set_plan_store(preview_store.InMemoryPlanStore())
+
+
+class TestOffsetTimeZoneRows:
+    def test_an_offset_time_zone_row_is_accepted(self, config, tmp_path, monkeypatch):
+        """Google's template allows `+0100` as well as an IANA id."""
+        _patch_drafts_client(monkeypatch, "UPLOAD_CALLS")
+        path = tmp_path / "phone.csv"
+        path.write_text(
+            "Parameters:TimeZone=+0100,,,,,\n"
+            + _CALL_HEADER
+            + "+14155550142,2026-03-01T12:00:00Z,My Action,"
+              "2026-03-01T13:00:00Z,10,USD\n"
+            + "+14155550143,01.03.2026 12:00,My Action,01.03.2026 13:00,10,USD\n"
+        )
+
+        result = conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+        rows = _stored_plan(result).apply_only_payload["rows"]
+
+        assert rows[1]["call_start_time"] == "2026-03-01 12:00:00+01:00"
+
+    def test_a_negative_offset_works_too(self, config, tmp_path, monkeypatch):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CALLS")
+        path = tmp_path / "phone.csv"
+        path.write_text(
+            "Parameters:TimeZone=-0500,,,,,\n"
+            + _CALL_HEADER
+            + "+14155550143,01.03.2026 12:00,My Action,01.03.2026 13:00,10,USD\n"
+        )
+
+        result = conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+        row = _stored_plan(result).apply_only_payload["rows"][0]
+
+        assert row["call_start_time"] == "2026-03-01 12:00:00-05:00"

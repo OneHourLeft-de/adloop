@@ -767,7 +767,7 @@ def _parse_timestamp(value: str, default_tz: str) -> tuple[str, str]:
     ``Parameters:TimeZone=…`` row for exactly that, and without one the row is
     refused instead of being uploaded against the server's idea of local time.
     """
-    from datetime import datetime
+    from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
 
     raw = (value or "").strip()
@@ -794,10 +794,18 @@ def _parse_timestamp(value: str, default_tz: str) -> tuple[str, str]:
                 "has no time zone — add a 'Parameters:TimeZone=…' row to the "
                 "CSV, or give the timestamp an offset"
             )
-        try:
-            parsed = parsed.replace(tzinfo=ZoneInfo(default_tz))
-        except Exception:  # noqa: BLE001 — unknown zone from the CSV
-            return "", f"uses an unknown time zone ({default_tz})"
+        # Google's template allows an IANA id or an offset like "+0100".
+        if re.fullmatch(r"[+-]\d{4}", default_tz):
+            sign = 1 if default_tz[0] == "+" else -1
+            offset = timedelta(
+                hours=int(default_tz[1:3]), minutes=int(default_tz[3:5])
+            )
+            parsed = parsed.replace(tzinfo=_tz(sign * offset))
+        else:
+            try:
+                parsed = parsed.replace(tzinfo=ZoneInfo(default_tz))
+            except Exception:  # noqa: BLE001 — unknown zone from the CSV
+                return "", f"uses an unknown time zone ({default_tz})"
 
     return parsed.isoformat(sep=" ", timespec="seconds"), ""
 
@@ -816,7 +824,7 @@ def _read_upload_csv(
 ) -> tuple[list[tuple[int, list[str]]], list[str], str]:
     """Read an upload CSV into ``(source_line, cells)`` records (header first).
 
-    ``source_line`` is the physical line in the file where the record ends —
+    ``source_line`` is the physical line in the file where the record starts —
     the only row number that means anything to the person editing the CSV, and
     therefore the only one used in errors, ``skipped_rows`` and the resume hint.
     Counting records instead would drift as soon as a comment or a bad row is
@@ -918,9 +926,9 @@ def _parse_call_conversion_csv(
 ) -> tuple[list[dict], list[str]]:
     """Read the call-conversions CSV (local file) and normalize each row.
 
-    Returns (rows, errors). Rows are dicts keyed by canonical column name; the
-    optional ``Parameters:TimeZone=...`` row at the top is skipped, as are
-    comment lines.
+    Returns (rows, errors). Rows are dicts keyed by canonical column name;
+    comment lines are skipped, and the optional ``Parameters:TimeZone=...`` row
+    is read rather than skipped — it resolves timestamps that carry no offset.
 
     The ``caller_id`` (E.164 phone) is retained RAW — Google requires it for
     call-to-click matching and it cannot be hashed. The draft stores it in
@@ -1242,6 +1250,15 @@ def _resolve_upload_action(
 _MAX_ROWS_PER_REQUEST = 2000
 
 
+class UploadNotSentError(RuntimeError):
+    """A batch failed before anything left the process.
+
+    Only this error means "nothing was sent": a missing payload, a proto that
+    could not be built. Everything else that happens once the request is on its
+    way leaves the rows' fate unknown, so the plan must not be retried blindly.
+    """
+
+
 class PartialUploadError(RuntimeError):
     """An upload stopped after some batches had already gone through.
 
@@ -1300,13 +1317,85 @@ def _source_line(row: dict, fallback: int) -> object:
     return row.get("source_line") or fallback
 
 
+def _failure_from(
+    exc: Exception,
+    *,
+    index: int,
+    batch_total: int,
+    first_line: object,
+    last_line: object,
+    done: int,
+    completed_batches: int,
+    chunk: list[dict],
+    start: int,
+    client: object,
+    ledger: list[dict],
+    dry_run: bool,
+    row_errors: list[dict],
+) -> PartialUploadError:
+    """Turn a failed request into the right ``PartialUploadError``.
+
+    A rejection (Google answered) and a transport failure (it may not have) are
+    different facts, and the caller needs to see which one it got.
+    """
+    from google.ads.googleads.errors import GoogleAdsException
+
+    from adloop.ads.validate_only import ValidateOnlyFailure
+    from adloop.ads.write import _extract_error_message
+
+    rejected = isinstance(exc, (GoogleAdsException, ValidateOnlyFailure))
+    detail = _extract_error_message(exc)
+    failure = getattr(exc, "failure", None)
+    batch_row_errors = (
+        _row_errors_from_failure(
+            client, failure, chunk, batch=index + 1, offset=start
+        )
+        if failure is not None
+        else []
+    )
+
+    if dry_run:
+        message = (
+            f"Validation failed in batch {index + 1} of {batch_total} "
+            f"(CSV lines {first_line}-{last_line}): {detail} Nothing was "
+            "uploaded — a dry run only validates."
+        )
+    elif rejected:
+        message = (
+            f"Upload failed in batch {index + 1} of {batch_total} (CSV lines "
+            f"{first_line}-{last_line}): {detail} {done} row(s) from "
+            f"{completed_batches} batch(es) are already uploaded and must not "
+            f"be sent again — resume the CSV at line {first_line}."
+        )
+    else:
+        message = (
+            f"Batch {index + 1} of {batch_total} (CSV lines {first_line}-"
+            f"{last_line}) failed with an unknown outcome: {detail} The request "
+            "may have been received before the failure surfaced, so treat these "
+            "rows as uploaded until you have checked the conversion action — "
+            f"{done} row(s) from earlier batches are definitely in."
+        )
+
+    return PartialUploadError(
+        message,
+        batches=ledger,
+        uploaded_total=done,
+        resume_from_line=first_line,
+        dry_run=dry_run,
+        row_errors=row_errors + batch_row_errors,
+        unknown_status=(not rejected) and not dry_run,
+    )
+
+
 def _upload_in_batches(
-    rows: list[dict], send, *, dry_run: bool = False, client: object = None
+    rows: list[dict], build, send, *, dry_run: bool = False, client: object = None
 ) -> dict:
     """Send ``rows`` in API-sized batches and report progress per batch.
 
-    ``send(chunk)`` builds the protos for one chunk, calls the upload service
-    and returns ``(payload, response)``.
+    ``build(chunk)`` turns rows into protos and ``send(payload)`` performs the
+    request. Keeping them apart matters for the error contract: a build failure
+    provably sent nothing, while anything after the request leaves the batch's
+    fate unknown.
 
     Row numbers are the physical CSV lines the rows came from, so a message
     means the same thing to whoever edits the file. A failure in batch 3 leaves
@@ -1326,92 +1415,82 @@ def _upload_in_batches(
         chunk = rows[start:start + _MAX_ROWS_PER_REQUEST]
         first_line = _source_line(chunk[0], start + 1)
         last_line = _source_line(chunk[-1], start + len(chunk))
+
+        # Phase 1: build the request. Nothing has left the process yet, so a
+        # failure here is an explicit "not sent" and the plan stays retryable.
         try:
-            payload, response = send(chunk)
-        except Exception as exc:  # noqa: BLE001 — re-raised with the ledger
-            done = sum(batch["uploaded"] for batch in ledger)
-            failure = getattr(exc, "failure", None)
-            batch_row_errors = (
-                _row_errors_from_failure(
-                    client, failure, chunk, batch=index + 1, offset=start
-                )
-                if failure is not None
-                else []
-            )
-            from google.ads.googleads.errors import GoogleAdsException
-
-            from adloop.ads.validate_only import ValidateOnlyFailure
-
-            # A rejection is a decision; anything else (deadline, dropped
-            # connection) leaves the batch's fate unknown — it may have been
-            # received before the failure surfaced.
-            rejected = isinstance(exc, (GoogleAdsException, ValidateOnlyFailure))
-            unknown = not rejected
-            # GoogleAdsException has no useful __str__; reuse the Ads parser.
-            from adloop.ads.write import _extract_error_message
-
-            detail = _extract_error_message(exc)
-
-            if dry_run:
-                message = (
-                    f"Validation failed in batch {index + 1} of {batch_total} "
-                    f"(CSV lines {first_line}-{last_line}): {detail} Nothing "
-                    "was uploaded — a dry run only validates."
-                )
-            elif unknown:
-                message = (
-                    f"Batch {index + 1} of {batch_total} (CSV lines "
-                    f"{first_line}-{last_line}) failed with an unknown outcome: "
-                    f"{detail} The request may have been received before the "
-                    f"failure surfaced, so treat these rows as uploaded until "
-                    f"you have checked the conversion action — {done} row(s) "
-                    "from earlier batches are definitely in."
-                )
-            else:
-                message = (
-                    f"Upload failed in batch {index + 1} of {batch_total} "
-                    f"(CSV lines {first_line}-{last_line}): {detail} {done} row(s) "
-                    f"from {len(ledger)} batch(es) are already uploaded and "
-                    "must not be sent again — resume the CSV at line "
-                    f"{first_line}."
-                )
-            raise PartialUploadError(
-                message,
-                batches=ledger,
-                uploaded_total=done,
-                resume_from_line=first_line,
-                dry_run=dry_run,
-                row_errors=row_errors + batch_row_errors,
-                unknown_status=unknown and not dry_run,
+            payload = build(chunk)
+        except Exception as exc:  # noqa: BLE001 — re-raised as "not sent"
+            raise UploadNotSentError(
+                f"Batch {index + 1} of {batch_total} could not be built (CSV "
+                f"lines {first_line}-{last_line}): {exc} Nothing was sent."
             ) from exc
 
-        results = list(response.results)
-        # Google populates the result row's ``conversion_action`` only for rows
-        # that actually matched; echoed identifiers come back for failed rows
-        # too, so they are not a success signal.
-        success = sum(1 for r in results if getattr(r, "conversion_action", ""))
-        success_total += success
-        ledger.append({
-            "batch": index + 1,
-            "first_source_line": first_line,
-            "last_source_line": last_line,
-            "uploaded": len(payload),
-            "success_count": success,
-            "failure_count": len(results) - success,
-        })
-        partial = getattr(response, "partial_failure_error", None)
-        if partial and partial.message:
-            row_errors.append({
-                "type": "partial_failure",
-                "batch": index + 1,
-                "message": partial.message,
-                "code": getattr(partial, "code", None),
-            })
-            row_errors.extend(
-                _row_errors_from_failure(
-                    client, partial, chunk, batch=index + 1, offset=start
-                )
+        # Phase 2: send it. From here on the batch's fate is Google's.
+        try:
+            response = send(payload)
+        except Exception as exc:  # noqa: BLE001 — re-raised with the ledger
+            raise _failure_from(
+                exc,
+                index=index,
+                batch_total=batch_total,
+                first_line=first_line,
+                last_line=last_line,
+                done=sum(batch["uploaded"] for batch in ledger),
+                completed_batches=len(ledger),
+                chunk=chunk,
+                start=start,
+                client=client,
+                ledger=ledger,
+                dry_run=dry_run,
+                row_errors=row_errors,
+            ) from exc
+
+        # Phase 3: read the result. The rows are uploaded by now, so an error
+        # here must not make the plan look retryable.
+        try:
+            results = list(response.results)
+            # Google populates the result row's ``conversion_action`` only for
+            # rows that actually matched; echoed identifiers come back for
+            # failed rows too, so they are not a success signal.
+            success = sum(
+                1 for r in results if getattr(r, "conversion_action", "")
             )
+            success_total += success
+            ledger.append({
+                "batch": index + 1,
+                "first_source_line": first_line,
+                "last_source_line": last_line,
+                "uploaded": len(payload),
+                "success_count": success,
+                "failure_count": len(results) - success,
+            })
+            partial = getattr(response, "partial_failure_error", None)
+            if partial and partial.message:
+                row_errors.append({
+                    "type": "partial_failure",
+                    "batch": index + 1,
+                    "message": partial.message,
+                    "code": getattr(partial, "code", None),
+                })
+                row_errors.extend(
+                    _row_errors_from_failure(
+                        client, partial, chunk, batch=index + 1, offset=start
+                    )
+                )
+        except Exception as exc:  # noqa: BLE001 — rows are already uploaded
+            raise PartialUploadError(
+                f"Batch {index + 1} of {batch_total} (CSV lines "
+                f"{first_line}-{last_line}) was sent, but its result could not "
+                f"be read: {exc} Treat those rows as uploaded.",
+                batches=ledger,
+                uploaded_total=sum(batch["uploaded"] for batch in ledger)
+                + len(payload),
+                resume_from_line=first_line,
+                dry_run=dry_run,
+                row_errors=row_errors,
+                unknown_status=True,
+            ) from exc
 
     uploaded_total = sum(batch["uploaded"] for batch in ledger)
     return {
@@ -1440,7 +1519,7 @@ def _apply_upload_call_conversions(
             # row_count > 0 without the payload means the plan store dropped
             # ``apply_only_payload``. Fail loudly; an empty upload that reports
             # success is the one outcome nobody would notice.
-            raise RuntimeError(
+            raise UploadNotSentError(
                 f"This plan expects {expected} row(s) but carries none: the plan "
                 "store did not persist ChangePlan.apply_only_payload. Nothing "
                 "was uploaded — draft the upload again."
@@ -1451,7 +1530,7 @@ def _apply_upload_call_conversions(
     consent = changes.get("consent")
     upload_service = client.get_service("ConversionUploadService")
 
-    def _send(chunk: list[dict]):
+    def _build(chunk: list[dict]):
         payload: list = []
         for r in chunk:
             cc = client.get_type("CallConversion")
@@ -1465,17 +1544,20 @@ def _apply_upload_call_conversions(
                 cc.currency_code = r["currency_code"]
             _apply_consent(client, cc, consent)
             payload.append(cc)
-        response = upload_service.upload_call_conversions(
+        return payload
+
+    def _send(payload: list):
+        return upload_service.upload_call_conversions(
             customer_id=cid,
             conversions=payload,
             # The API requires partial failure on uploads; leaving rows out of
             # the request because one is malformed would be worse.
             partial_failure=True,
         )
-        return payload, response
 
     ledger = _upload_in_batches(
         rows,
+        _build,
         _send,
         dry_run=bool(getattr(client, "is_validate_only", False)),
         client=client,
@@ -1931,7 +2013,7 @@ def _apply_upload_enhanced_conversions_for_leads(
     if not rows:
         expected = int(changes.get("row_count") or 0)
         if expected:
-            raise RuntimeError(
+            raise UploadNotSentError(
                 f"This plan expects {expected} row(s) but carries none: the plan "
                 "store did not persist ChangePlan.apply_only_payload. Nothing "
                 "was uploaded — draft the upload again."
@@ -1942,7 +2024,7 @@ def _apply_upload_enhanced_conversions_for_leads(
     consent = changes.get("consent")
     upload_service = client.get_service("ConversionUploadService")
 
-    def _send(chunk: list[dict]):
+    def _build(chunk: list[dict]):
         payload: list = []
         for r in chunk:
             cc = client.get_type("ClickConversion")
@@ -1980,15 +2062,18 @@ def _apply_upload_enhanced_conversions_for_leads(
                 uid.address_info.country_code = r["country_code"]
                 cc.user_identifiers.append(uid)
             payload.append(cc)
-        response = upload_service.upload_click_conversions(
+        return payload
+
+    def _send(payload: list):
+        return upload_service.upload_click_conversions(
             customer_id=cid,
             conversions=payload,
             partial_failure=True,
         )
-        return payload, response
 
     ledger = _upload_in_batches(
         rows,
+        _build,
         _send,
         dry_run=bool(getattr(client, "is_validate_only", False)),
         client=client,

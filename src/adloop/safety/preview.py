@@ -157,7 +157,21 @@ def remove_plan(plan_id: str) -> None:
 
 
 def claim_plan(plan_id: str) -> ChangePlan | None:
-    """Atomically take a plan out of the store (see ``PlanStore.claim``)."""
+    """Atomically take a plan out of the store (see ``PlanStore.claim``).
+
+    ``claim`` is what a store should implement; a store that predates it gets
+    the non-atomic get-then-remove fallback rather than an AttributeError. The
+    hosted store should still add it: without it two confirmations that overlap
+    can both pass this check.
+    """
     from adloop.runtime import current_tenant
 
-    return _active_store.claim(current_tenant(), plan_id)
+    tenant = current_tenant()
+    store = _active_store
+    claim = getattr(store, "claim", None)
+    if claim is not None:
+        return claim(tenant, plan_id)
+    plan = store.get(tenant, plan_id)
+    if plan is not None:
+        store.remove(tenant, plan_id)
+    return plan

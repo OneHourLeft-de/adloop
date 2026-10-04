@@ -2808,17 +2808,20 @@ def confirm_and_apply(
         # the batches that went through. Retire the plan: confirming it again —
         # the obvious reflex after an error — would resend those rows, and call
         # conversions have no dedup key to absorb the duplicates.
-        from adloop.ads.conversion_actions import PartialUploadError
-
-        upload_happened = isinstance(e, PartialUploadError) and (
-            e.uploaded_total or e.unknown_status
+        from adloop.ads.conversion_actions import (
+            PartialUploadError,
+            UploadNotSentError,
         )
-        if not upload_happened:
-            # Nothing was sent (or the request never left): the plan is still
-            # the caller's to fix and retry.
+
+        # For an upload the default is the cautious one: anything that failed
+        # once the request was on its way may have been received, so the plan
+        # stays claimed unless the error says explicitly that nothing was sent.
+        if isinstance(e, UploadNotSentError) or not plan.operation.startswith(
+            "upload_"
+        ):
             store_plan(plan)
 
-        if isinstance(e, PartialUploadError) and e.uploaded_total:
+        if isinstance(e, PartialUploadError) and (e.uploaded_total or e.unknown_status):
             log_mutation(
                 config.safety.log_file,
                 operation=plan.operation,
@@ -2827,7 +2830,11 @@ def confirm_and_apply(
                 entity_id=plan.entity_id,
                 changes=plan.changes,
                 dry_run=False,
-                result="partial_upload",
+                result=(
+                    "unknown_status"
+                    if e.unknown_status
+                    else "partial_upload"
+                ),
                 error=error_message,
             )
             remove_plan(plan.plan_id)
