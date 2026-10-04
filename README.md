@@ -110,11 +110,14 @@ The best features come from real workflows. If you're using AdLoop and find your
 | `get_brand_lists` | List brand lists (SharedSets of type BRANDS) — ID, name, status, member count |
 | `get_brand_list_brands` | List the brands inside a list, with the Commercial KG MID and the criterion ID for removals |
 | `get_brand_list_campaigns` | Which campaigns a brand list is attached to, and whether each attachment excludes or targets |
+| `get_custom_conversion_goals` | Custom conversion goals with their actions, plus one campaign's goal config |
 | `run_gaql` | Arbitrary GAQL queries for anything else |
 
 > **Brand lists** — a list is a `SharedSet` of type `BRANDS`; attaching it to a campaign is a `CampaignCriterion.brand_list` (`negative=true` excludes, `false` restricts), **not** a `CampaignSharedSet` like negative keyword lists. `remove_from_brand_list` and `detach_brand_list_from_campaigns` remove for real — `SharedCriterion` has no status field.
 
 > **Brand targeting** — brand criteria (brand lists, brand exclusions) target a brand's **Commercial Knowledge Graph ID**, not its display name. Use `suggest_brands` for a single name or `check_brand_names` for a shortlist to get the ID; `exact_match` marks a candidate whose name matches apart from case and punctuation, everything else is a Google suggestion.
+
+> **Custom conversion goals** — a named set of conversion actions that a campaign can be pointed at. `get_custom_conversion_goals` shows the goals with their actions and a campaign's current goal config; `draft_custom_conversion_goal` creates a set, `draft_update_custom_conversion_goal` renames or replaces its actions, `draft_assign_custom_conversion_goal` points a campaign at it and `draft_clear_custom_conversion_goal` puts the campaign back on the account-level goals. Only the goal and the campaign's goal config are touched — conversion actions, bidding and budgets stay as they are.
 
 > **Compact mode** — `get_campaign_performance`, `get_keyword_performance`, `get_search_terms`, and `get_ad_performance` accept `compact=true`: account totals, breakdowns, top-10 rows, and pre-computed offender lists (zero-conversion spenders, low-QS keywords, negative-keyword candidates, thin RSAs) instead of every row. ~90% smaller responses — built for account audits so raw tables don't flood your AI's context.
 
@@ -233,6 +236,10 @@ All write operations follow a **draft → preview → confirm** workflow. Nothin
 | `remove_from_brand_list` | Draft removing brands from a list (SharedCriteria have no status — removal is the only way; asks for a second confirmation) |
 | `attach_brand_list_to_campaigns` | Draft attaching an existing brand list to campaigns as `CampaignCriterion.brand_list` |
 | `detach_brand_list_from_campaigns` | Draft detaching a brand list from campaigns (removes only the criterion, the list stays) |
+| `draft_custom_conversion_goal` | Create a custom conversion goal (a named set of conversion actions) |
+| `draft_update_custom_conversion_goal` | Rename a custom conversion goal and/or replace its action list (list replace, not append) |
+| `draft_assign_custom_conversion_goal` | Point a campaign at a custom conversion goal (`goal_config_level = CAMPAIGN`) |
+| `draft_clear_custom_conversion_goal` | Put a campaign back on the account-level goals (rollback) |
 | `pause_entity` | Pause a campaign, ad group, ad, or keyword |
 | `enable_entity` | Re-enable a paused entity |
 | `remove_entity` | Permanently remove an entity (irreversible — prefers pause). Supports keywords, negative keywords, ads, ad groups, campaigns. |

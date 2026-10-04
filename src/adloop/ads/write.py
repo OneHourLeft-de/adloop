@@ -3339,6 +3339,13 @@ def _dispatch_ads_plan(client: object, cid: str, plan: object) -> dict:
         _apply_remove_conversion_action,
         _apply_update_conversion_action,
     )
+    # Custom conversion goals live in their own module for the same reason.
+    from adloop.ads.custom_conversion_goals import (
+        _apply_assign_custom_conversion_goal,
+        _apply_clear_custom_conversion_goal,
+        _apply_create_custom_conversion_goal,
+        _apply_update_custom_conversion_goal,
+    )
 
     dispatch = {
         "create_campaign": _apply_create_campaign,
@@ -3360,6 +3367,10 @@ def _dispatch_ads_plan(client: object, cid: str, plan: object) -> dict:
         "remove_from_brand_list": _apply_remove_from_brand_list,
         "attach_brand_list_to_campaigns": _apply_attach_brand_list_to_campaigns,
         "detach_brand_list_from_campaigns": _apply_detach_brand_list_from_campaigns,
+        "create_custom_conversion_goal": _apply_create_custom_conversion_goal,
+        "update_custom_conversion_goal": _apply_update_custom_conversion_goal,
+        "assign_custom_conversion_goal": _apply_assign_custom_conversion_goal,
+        "clear_custom_conversion_goal": _apply_clear_custom_conversion_goal,
         "pause_entity": _apply_status_change,
         "enable_entity": _apply_status_change,
         "remove_entity": _apply_remove,
