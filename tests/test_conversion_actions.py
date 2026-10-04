@@ -1,6 +1,8 @@
 """Tests for conversion-action write tools (create / update / remove)."""
 from __future__ import annotations
 
+import re
+
 from types import SimpleNamespace
 
 import pytest
@@ -705,10 +707,11 @@ class TestGaqlEscape:
                 type_name="UPLOAD_CALLS",
             )
         ])
-        conversion_actions._resolve_conversion_action_ids(
+        conversion_actions._resolve_upload_action(
             _client_with(upload_service=_FakeUploadService(), ads_service=ads),
             "1",
             ["O'Brien Lead"],
+            expected_type="UPLOAD_CALLS",
         )
         assert "O\\'Brien Lead" in ads.last_query
         # Must NOT contain the SQL-style doubled-quote form.
@@ -911,7 +914,43 @@ class TestParseCallConversionCsv:
         assert any("Call Start Time" in e for e in errors)
 
 
+
+class _EchoActionRows:
+    """GoogleAdsService stand-in: answers with the names the query asked for.
+
+    The drafts validate the conversion-action names against the account, so a
+    draft test needs an ads service. Parsing the names out of the query keeps
+    the stub independent of which names a test happens to use.
+    """
+
+    def __init__(self, type_name: str = "UPLOAD_CALLS"):
+        self.type_name = type_name
+        self.queries: list[str] = []
+
+    def search(self, *, customer_id, query):
+        self.queries.append(query)
+        names = [m.replace("''", "'") for m in re.findall(r"'((?:[^']|'')*)'", query)]
+        return iter([
+            _FakeSearchRow(
+                name, f"customers/1/conversionActions/{index}", type_name=self.type_name
+            )
+            for index, name in enumerate(names, start=1)
+        ])
+
+
+def _patch_drafts_client(monkeypatch, type_name: str = "UPLOAD_CALLS") -> _EchoActionRows:
+    """Let drafts reach an account: names in the CSV resolve to resource names."""
+    ads = _EchoActionRows(type_name)
+    client = _client_with(upload_service=_FakeUploadService(), ads_service=ads)
+    monkeypatch.setattr("adloop.ads.client.get_ads_client", lambda _cfg: client)
+    return ads
+
+
 class TestDraftUploadCallConversions:
+    @pytest.fixture(autouse=True)
+    def _ads(self, monkeypatch):
+        return _patch_drafts_client(monkeypatch, "UPLOAD_CALLS")
+
     def _write(self, tmp_path):
         p = tmp_path / "phone.csv"
         p.write_text(
@@ -977,6 +1016,39 @@ class TestDraftUploadCallConversions:
         assert "+15555550142" not in repr(plan.changes)
         assert "+15555550142" not in repr(plan.to_preview())
 
+    def test_a_wrong_action_type_is_refused_at_draft_time(
+        self, config, tmp_path, monkeypatch
+    ):
+        """Call uploads need UPLOAD_CALLS; the check runs before confirmation."""
+        _patch_drafts_client(monkeypatch, "UPLOAD_CLICKS")
+        path = self._write(tmp_path)
+
+        result = conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", csv_path=path
+        )
+
+        assert "UPLOAD_CALLS" in result["error"]
+        assert "plan_id" not in result
+
+    def test_an_unknown_action_is_refused_at_draft_time(
+        self, config, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "adloop.ads.client.get_ads_client",
+            lambda _cfg: _client_with(
+                upload_service=_FakeUploadService(),
+                ads_service=_FakeGoogleAdsService([]),
+            ),
+        )
+        path = self._write(tmp_path)
+
+        result = conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", csv_path=path
+        )
+
+        assert "not found" in result["error"]
+        assert "plan_id" not in result
+
     def test_consent_stored_in_plan(self, config, tmp_path):
         path = self._write(tmp_path)
         result = conversion_actions.draft_upload_call_conversions(
@@ -1023,7 +1095,12 @@ class TestApplyUploadCallConversions:
                 "currency_code": "USD",
             },
         ]
-        changes = {"rows": rows, "partial_failure": True}
+        changes = {
+            "rows": rows,
+            "partial_failure": True,
+            # Resolved at draft time now, so a hand-built plan carries it too.
+            "conversion_actions": {"My Action": "customers/1/conversionActions/777"},
+        }
         if consent is not None:
             changes["consent"] = consent
         return changes
@@ -1094,31 +1171,6 @@ class TestApplyUploadCallConversions:
         enums = client.enums.ConsentStatusEnum
         assert sent[0].consent.ad_user_data == enums.GRANTED
         assert sent[0].consent.ad_personalization == enums.DENIED
-
-    def test_wrong_type_raises(self, tmp_path):
-        upload = _FakeUploadService()
-        ads = _FakeGoogleAdsService([
-            _FakeSearchRow(
-                "My Action", "customers/1/conversionActions/777",
-                type_name="UPLOAD_CLICKS",
-            )
-        ])
-        client = _client_with(upload_service=upload, ads_service=ads)
-        with pytest.raises(ValueError) as exc:
-            conversion_actions._apply_upload_call_conversions(
-                client, "1", self._changes()
-            )
-        assert "UPLOAD_CALLS" in str(exc.value)
-
-    def test_action_not_found_raises(self, tmp_path):
-        upload = _FakeUploadService()
-        ads = _FakeGoogleAdsService([])
-        client = _client_with(upload_service=upload, ads_service=ads)
-        with pytest.raises(ValueError) as exc:
-            conversion_actions._apply_upload_call_conversions(
-                client, "1", self._changes()
-            )
-        assert "not found" in str(exc.value)
 
     def test_empty_rows_returns_error(self, tmp_path):
         upload = _FakeUploadService()
@@ -1210,6 +1262,10 @@ class TestParseEcForLeadsCsvHashesPii:
 
 
 class TestDraftUploadEcForLeads:
+    @pytest.fixture(autouse=True)
+    def _ads(self, monkeypatch):
+        return _patch_drafts_client(monkeypatch, "UPLOAD_CLICKS")
+
     def _write(self, tmp_path, *, order_id=False):
         header = _EC_HEADER + (",Order ID" if order_id else "")
         r1 = ("user@example.com,+15555550142,Test,User,Job Close,"
@@ -1346,7 +1402,11 @@ class TestApplyUploadEcForLeads:
                 "order_id": "ORD-002" if order_id else "",
             },
         ]
-        changes = {"rows": rows, "partial_failure": True}
+        changes = {
+            "rows": rows,
+            "conversion_actions": {"My Job": "customers/1/conversionActions/778"},
+            "partial_failure": True,
+        }
         if consent is not None:
             changes["consent"] = consent
         return changes
@@ -1434,14 +1494,6 @@ class TestApplyUploadEcForLeads:
         assert sent[0].consent.ad_user_data == enums.GRANTED
         assert sent[0].consent.ad_personalization == enums.DENIED
 
-    def test_wrong_type_rejected(self, tmp_path):
-        client, _ = self._client(results_count=0, type_name="UPLOAD_CALLS")
-        with pytest.raises(ValueError) as exc:
-            conversion_actions._apply_upload_enhanced_conversions_for_leads(
-                client, "1", self._changes()
-            )
-        assert "UPLOAD_CLICKS" in str(exc.value)
-
     def test_gaql_escape_used_for_ec_resolver(self, tmp_path):
         ads = _FakeGoogleAdsService([
             _FakeSearchRow(
@@ -1449,9 +1501,9 @@ class TestApplyUploadEcForLeads:
                 type_name="UPLOAD_CLICKS",
             )
         ])
-        conversion_actions._resolve_upload_clicks_action(
+        conversion_actions._resolve_upload_action(
             _ec_client_with(upload=_FakeClickUploadService(), ads=ads),
-            "1", ["O'Brien Lead"],
+            "1", ["O'Brien Lead"], expected_type="UPLOAD_CLICKS",
         )
         assert "O\\'Brien Lead" in ads.last_query
         assert "O''Brien" not in ads.last_query
@@ -1653,6 +1705,7 @@ class TestUploadToolRegistration:
 
 
 class TestCsvInputHardening:
+
     """The upload CSV is a local file; on a hosted runtime it must not be read."""
 
     def _write(self, tmp_path, body: str, name: str = "upload.csv"):
@@ -1728,6 +1781,7 @@ class TestUploadBatching:
     def _changes(self, rows: int) -> dict:
         return {
             "row_count": rows,
+            "conversion_actions": {"A": "customers/1/conversionActions/7"},
             "rows": [
                 {
                     "caller_id": f"+1555555{i:04d}",
@@ -1816,13 +1870,20 @@ class TestUploadBatching:
         result = conversion_actions._apply_upload_enhanced_conversions_for_leads(
             _ec_client_with(upload=upload, ads=ads),
             "1234567890",
-            {"row_count": 2001, "rows": rows},
+            {
+                "row_count": 2001,
+                "rows": rows,
+                "conversion_actions": {"A": "customers/1/conversionActions/8"},
+            },
         )
 
         assert [len(c["conversions"]) for c in upload.calls] == [2000, 1]
         assert result["batch_count"] == 2
 
-    def test_upload_plans_ask_for_a_second_confirmation(self, config, tmp_path):
+    def test_upload_plans_ask_for_a_second_confirmation(
+        self, config, tmp_path, monkeypatch
+    ):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CALLS")
         """A signal to the model — the brake that enforces anything is
         safety.two_phase_apply, which the Google path does not read."""
         path = tmp_path / "phone.csv"
@@ -1844,9 +1905,13 @@ _EC_HEADER_ADDRESS = _EC_HEADER.replace(
 
 
 class TestSkippedAndUnmatchableRows:
+
     """Rows that cannot match are reported, not uploaded and not silently counted."""
 
-    def test_call_rows_without_a_usable_caller_id_are_reported(self, config, tmp_path):
+    def test_call_rows_without_a_usable_caller_id_are_reported(
+        self, config, tmp_path, monkeypatch
+    ):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CALLS")
         path = tmp_path / "phone.csv"
         path.write_text(
             _CALL_HEADER
@@ -1867,7 +1932,10 @@ class TestSkippedAndUnmatchableRows:
         assert "E.164" in plan.changes["skipped_rows"][1]["reason"]
         assert len(plan.apply_only_payload["rows"]) == 1
 
-    def test_a_csv_of_only_unusable_call_rows_plans_nothing(self, config, tmp_path):
+    def test_a_csv_of_only_unusable_call_rows_plans_nothing(
+        self, config, tmp_path, monkeypatch
+    ):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CALLS")
         path = tmp_path / "phone.csv"
         path.write_text(
             _CALL_HEADER
@@ -1881,7 +1949,8 @@ class TestSkippedAndUnmatchableRows:
         assert "Nothing was planned" in result["error"]
         assert result["skipped_rows"][0]["row"] == 1
 
-    def test_ec_rows_without_any_identifier_are_reported(self, config, tmp_path):
+    def test_ec_rows_without_any_identifier_are_reported(self, config, tmp_path, monkeypatch):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CLICKS")
         path = tmp_path / "leads.csv"
         path.write_text(
             _EC_HEADER + "\n"
@@ -1899,7 +1968,8 @@ class TestSkippedAndUnmatchableRows:
         assert plan.changes["skipped_count"] == 1
         assert "no usable identifier" in plan.changes["skipped_rows"][0]["reason"]
 
-    def test_name_only_rows_are_kept_but_warned(self, config, tmp_path):
+    def test_name_only_rows_are_kept_but_warned(self, config, tmp_path, monkeypatch):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CLICKS")
         path = tmp_path / "leads.csv"
         path.write_text(
             _EC_HEADER + "\n"
@@ -1916,7 +1986,8 @@ class TestSkippedAndUnmatchableRows:
         assert plan.changes["row_count"] == 1
         assert any("only hashed names" in w for w in plan.changes["match_warnings"])
 
-    def test_a_non_e164_phone_drops_the_identifier_and_warns(self, config, tmp_path):
+    def test_a_non_e164_phone_drops_the_identifier_and_warns(self, config, tmp_path, monkeypatch):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CLICKS")
         """The row survives on its email; only the unusable phone is dropped."""
         path = tmp_path / "leads.csv"
         path.write_text(
@@ -1935,7 +2006,8 @@ class TestSkippedAndUnmatchableRows:
         assert row["email_sha256"]                 # but the row is still useful
         assert any("not E.164" in w for w in plan.changes["match_warnings"])
 
-    def test_a_row_with_only_an_unusable_phone_is_skipped(self, config, tmp_path):
+    def test_a_row_with_only_an_unusable_phone_is_skipped(self, config, tmp_path, monkeypatch):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CLICKS")
         path = tmp_path / "leads.csv"
         path.write_text(
             _EC_HEADER + "\n"
@@ -1973,7 +2045,11 @@ class TestSkippedAndUnmatchableRows:
         conversion_actions._apply_upload_enhanced_conversions_for_leads(
             _ec_client_with(upload=upload, ads=ads),
             "1234567890",
-            {"row_count": 1, "rows": rows},
+            {
+                "row_count": 1,
+                "rows": rows,
+                "conversion_actions": {"A": "customers/1/conversionActions/8"},
+            },
         )
 
         conversion = upload.calls[0]["conversions"][0]
@@ -1985,7 +2061,8 @@ class TestSkippedAndUnmatchableRows:
         assert address.country_code == "DE"
         assert address.hashed_first_name == _FIRST_HASH
 
-    def test_csv_with_address_columns_counts_them(self, config, tmp_path):
+    def test_csv_with_address_columns_counts_them(self, config, tmp_path, monkeypatch):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CLICKS")
         path = tmp_path / "leads.csv"
         path.write_text(
             _EC_HEADER_ADDRESS + "\n"

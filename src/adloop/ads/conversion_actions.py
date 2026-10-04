@@ -955,6 +955,20 @@ def draft_upload_call_conversions(
     distinct_actions = sorted({r["conversion_name"] for r in rows})
     total_value = sum(r["conversion_value"] for r in rows)
 
+    # Validate the action names against the account now, not after the upload
+    # ran: a typo in the CSV should not cost a confirmed plan. The resource
+    # names travel in the plan, so apply does not query a second time.
+    from adloop.ads.client import get_ads_client, normalize_customer_id
+
+    cid = normalize_customer_id(customer_id or config.ads.customer_id)
+    try:
+        action_resources = _resolve_upload_action(
+            get_ads_client(config), cid, distinct_actions,
+            expected_type="UPLOAD_CALLS",
+        )
+    except ValueError as e:
+        return {"error": str(e)}
+
     # Freeze the exact rows apply will upload (caller_id RAW — required by
     # Google). These live in the plan; the audit path redacts caller_id.
     frozen_rows = [
@@ -985,6 +999,8 @@ def draft_upload_call_conversions(
             "skipped_count": len(skipped),
             "skipped_rows": skipped,
             "distinct_conversion_actions": distinct_actions,
+            # Resolved at draft time; apply reads them instead of querying again.
+            "conversion_actions": action_resources,
             "partial_failure": True,
             "consent": consent_norm,
             "parse_warnings": parse_errors,
@@ -1007,12 +1023,19 @@ def draft_upload_call_conversions(
     return plan.to_preview()
 
 
-def _resolve_conversion_action_ids(
-    client: object, cid: str, names: list[str]
+def _resolve_upload_action(
+    client: object, cid: str, names: list[str], *, expected_type: str
 ) -> dict[str, str]:
-    """Look up conversion_action.resource_name for a list of names.
+    """Map conversion-action names to resource names, enforcing the type.
 
-    Raises ValueError if any name isn't found OR isn't of type UPLOAD_CALLS.
+    Both uploads look actions up by the name in the CSV's ``Conversion Name``
+    column, which is why this is validated at draft time: a typo would
+    otherwise surface only after the upload ran. The resource names are stored
+    in the plan, so apply does not query again.
+
+    ``UPLOAD_CALLS`` for call uploads, ``UPLOAD_CLICKS`` for Enhanced
+    Conversions for Leads (which layers identifier matching on top of click
+    conversions).
     """
     if not names:
         return {}
@@ -1030,29 +1053,28 @@ def _resolve_conversion_action_ids(
     response = ga_service.search(customer_id=cid, query=query)
 
     mapping: dict[str, str] = {}
-    bad_types: list[str] = []
+    wrong_type: list[str] = []
     for row in response:
         ca = row.conversion_action
         ca_type = ca.type_.name if hasattr(ca.type_, "name") else str(ca.type_)
-        if ca_type != "UPLOAD_CALLS":
-            bad_types.append(f"{ca.name} (type={ca_type})")
+        if ca_type != expected_type:
+            wrong_type.append(f"{ca.name} (type={ca_type})")
             continue
         mapping[ca.name] = ca.resource_name
 
-    missing = [n for n in names if n not in mapping]
-    if bad_types:
+    if wrong_type:
         raise ValueError(
-            "Some conversion actions exist but are not of type UPLOAD_CALLS "
-            f"(needed for call uploads): {bad_types}. "
-            "Create a new conversion action via "
-            "draft_create_conversion_action(type_='UPLOAD_CALLS', ...) "
-            "or via Google Ads UI: Tools → Conversions → New → "
-            "Import → Other data sources → Track conversions from calls."
+            f"Conversion action(s) are not of type {expected_type}, which this "
+            f"upload requires: {wrong_type}. Use "
+            f"draft_create_conversion_action(type_='{expected_type}', ...) or an "
+            "existing action of that type."
         )
+    missing = [n for n in names if n not in mapping]
     if missing:
         raise ValueError(
-            f"Conversion action(s) not found: {missing}. "
-            "Verify the 'Conversion Name' column in the CSV matches exactly."
+            f"Conversion action(s) not found: {missing}. Verify the "
+            "'Conversion Name' column in the CSV matches an existing action "
+            "name exactly."
         )
     return mapping
 
@@ -1099,9 +1121,7 @@ def _upload_in_batches(rows: list[dict], send) -> dict:
         # Google populates the result row's ``conversion_action`` only for rows
         # that actually matched; echoed identifiers come back for failed rows
         # too, so they are not a success signal.
-        success = sum(
-            1 for r in results if getattr(r, "conversion_action", "")
-        )
+        success = sum(1 for r in results if getattr(r, "conversion_action", ""))
         success_total += success
         ledger.append({
             "batch": index + 1,
@@ -1154,8 +1174,12 @@ def _apply_upload_call_conversions(
             )
         return {"error": "Plan contained zero call-conversion rows"}
 
-    distinct = sorted({r["conversion_name"] for r in rows})
-    action_resources = _resolve_conversion_action_ids(client, cid, distinct)
+    action_resources = changes.get("conversion_actions") or {}
+    if not action_resources:
+        raise RuntimeError(
+            "This plan carries no resolved conversion actions; it was created "
+            "before the draft validated them. Draft the upload again."
+        )
     consent = changes.get("consent")
     upload_service = client.get_service("ConversionUploadService")
 
@@ -1421,6 +1445,18 @@ def draft_upload_enhanced_conversions_for_leads(
 
     distinct_actions = sorted({r["conversion_name"] for r in rows})
     total_value = sum(r["conversion_value"] for r in rows)
+
+    from adloop.ads.client import get_ads_client, normalize_customer_id
+
+    cid = normalize_customer_id(customer_id or config.ads.customer_id)
+    try:
+        action_resources = _resolve_upload_action(
+            get_ads_client(config), cid, distinct_actions,
+            expected_type="UPLOAD_CLICKS",
+        )
+    except ValueError as e:
+        return {"error": str(e)}
+
     with_email = sum(1 for r in rows if r["email_sha256"])
     with_phone = sum(1 for r in rows if r["phone_sha256"])
     with_order_id = sum(1 for r in rows if r.get("order_id"))
@@ -1494,6 +1530,8 @@ def draft_upload_enhanced_conversions_for_leads(
             "skipped_count": len(skipped),
             "skipped_rows": skipped,
             "distinct_conversion_actions": distinct_actions,
+            # Resolved at draft time; apply reads them instead of querying again.
+            "conversion_actions": action_resources,
             "partial_failure": True,
             "consent": consent_norm,
             "parse_warnings": parse_errors,
@@ -1523,51 +1561,6 @@ def draft_upload_enhanced_conversions_for_leads(
     return plan.to_preview()
 
 
-def _resolve_upload_clicks_action(
-    client: object, cid: str, names: list[str]
-) -> dict[str, str]:
-    """Look up conversion_action.resource_name for UPLOAD_CLICKS actions."""
-    if not names:
-        return {}
-
-    ga_service = client.get_service("GoogleAdsService")
-    quoted = ", ".join(f"'{_gaql_escape(n)}'" for n in names)
-    query = (
-        "SELECT conversion_action.id, conversion_action.name, "
-        "conversion_action.resource_name, conversion_action.type, "
-        "conversion_action.status "
-        "FROM conversion_action "
-        f"WHERE conversion_action.name IN ({quoted}) "
-        "AND conversion_action.status != 'REMOVED'"
-    )
-    response = ga_service.search(customer_id=cid, query=query)
-
-    mapping: dict[str, str] = {}
-    wrong_type: list[str] = []
-    for row in response:
-        ca = row.conversion_action
-        ca_type = ca.type_.name if hasattr(ca.type_, "name") else str(ca.type_)
-        if ca_type != "UPLOAD_CLICKS":
-            wrong_type.append(f"{ca.name} (type={ca_type})")
-            continue
-        mapping[ca.name] = ca.resource_name
-
-    missing = [n for n in names if n not in mapping]
-    if wrong_type:
-        raise ValueError(
-            "Some conversion actions are not of type UPLOAD_CLICKS "
-            "(required for Enhanced Conversions for Leads uploads): "
-            f"{wrong_type}. Use an UPLOAD_CLICKS-type action — create one "
-            "via draft_create_conversion_action(type_='UPLOAD_CLICKS', ...)."
-        )
-    if missing:
-        raise ValueError(
-            f"Conversion action(s) not found: {missing}. "
-            "Verify the 'Conversion Name' column in the CSV."
-        )
-    return mapping
-
-
 def _apply_upload_enhanced_conversions_for_leads(
     client: object, cid: str, changes: dict
 ) -> dict:
@@ -1588,8 +1581,12 @@ def _apply_upload_enhanced_conversions_for_leads(
             )
         return {"error": "Plan contained zero EC-for-leads rows"}
 
-    distinct = sorted({r["conversion_name"] for r in rows})
-    action_resources = _resolve_upload_clicks_action(client, cid, distinct)
+    action_resources = changes.get("conversion_actions") or {}
+    if not action_resources:
+        raise RuntimeError(
+            "This plan carries no resolved conversion actions; it was created "
+            "before the draft validated them. Draft the upload again."
+        )
     consent = changes.get("consent")
     upload_service = client.get_service("ConversionUploadService")
 
