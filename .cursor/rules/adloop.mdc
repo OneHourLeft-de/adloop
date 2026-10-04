@@ -54,6 +54,7 @@ You have access to AdLoop MCP tools that connect Google Ads, Reddit Ads and Goog
 | `get_brand_list_brands` | Contents of a brand list, with `entity_id` (the MID) and `criterion_id` (needed for removal) | `shared_set_id` (required) |
 | `get_brand_list_campaigns` | Which campaigns a brand list is attached to, and whether each attachment excludes (`role: excluded`) or targets (`role: targeted`) | `shared_set_id` (optional) |
 | `get_ai_max_settings` | The AI Max knobs of Search campaigns: `enable_ai_max`, `bundling_required`, the full `asset_automation_settings` list, and each ad group's `disable_search_term_matching` | `campaign_id` (optional) |
+| `get_custom_conversion_goals` | Custom conversion goals (named sets of conversion actions) and one campaign's goal config | `campaign_id` (optional) |
 | `run_gaql` | Custom queries not covered by other tools | `query`, `format` (table/json/csv) |
 
 **Return format notes:**
@@ -216,6 +217,10 @@ Reddit is a second ad platform with its own connection (own OAuth app, no develo
 | `remove_from_brand_list` | Remove brands from a list. SharedCriteria have no status, so this is a real removal (double confirmation). | `shared_set_id`, `criterion_ids` |
 | `attach_brand_list_to_campaigns` | Attach an existing brand list as `CampaignCriterion.brand_list` — NOT a `CampaignSharedSet`. `negative=True` excludes, `False` restricts. | `shared_set_id`, `campaign_ids`, optional `negative` |
 | `detach_brand_list_from_campaigns` | Remove the brand-list criterion from campaigns; the list itself stays. | `shared_set_id`, `campaign_ids` |
+| `draft_custom_conversion_goal` | Create a custom conversion goal from conversion actions. Refuses unknown/REMOVED actions, collapses duplicates and reports `already_exists` when the same name and action set are present (REMOVED goals don't count). Always created ENABLED. | `name`, `conversion_action_ids` |
+| `draft_update_custom_conversion_goal` | Rename a goal and/or REPLACE its action list (not append). Reports `no_change` when nothing differs. | `custom_conversion_goal_id`, optional `name`, optional `conversion_action_ids` |
+| `draft_assign_custom_conversion_goal` | Point a campaign at a custom goal (`goal_config_level=CAMPAIGN`). Reports `already_configured` when it already is. Both previews note that changing the optimisation goal restarts Smart Bidding's learning period. | `campaign_id`, `custom_conversion_goal_id` |
+| `draft_clear_custom_conversion_goal` | Put a campaign back on the account-level goals — the rollback for the assign tool. | `campaign_id` |
 | `add_to_negative_keyword_list` | Append keywords to an EXISTING shared negative keyword list (does NOT add) | `shared_set_id` (from `get_negative_keyword_lists`), keyword list, `match_type` |
 | `attach_shared_set_to_campaigns` | Attach an EXISTING shared set (e.g. shared negative keyword list) to one or more campaigns. Use after creating a campaign to inherit pre-built negatives. | `shared_set_id` (from `get_negative_keyword_lists`), `campaign_ids` list |
 | `detach_shared_set_from_campaigns` | Detach a shared set from one or more campaigns. Removes only the linkage; the shared set and its keywords stay intact. | `shared_set_id`, `campaign_ids` list |
