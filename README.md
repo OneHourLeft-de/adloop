@@ -110,9 +110,9 @@ The best features come from real workflows. If you're using AdLoop and find your
 | `get_brand_lists` | List brand lists (SharedSets of type BRANDS) — ID, name, status, member count |
 | `get_brand_list_brands` | List the brands inside a list, with the Commercial KG MID and the criterion ID for removals |
 | `get_brand_list_campaigns` | Which campaigns a brand list is attached to, and whether each attachment excludes or targets |
+| `run_gaql` | Arbitrary GAQL queries for anything else |
 
 > **Brand lists** — a list is a `SharedSet` of type `BRANDS`; attaching it to a campaign is a `CampaignCriterion.brand_list` (`negative=true` excludes, `false` restricts), **not** a `CampaignSharedSet` like negative keyword lists. `remove_from_brand_list` and `detach_brand_list_from_campaigns` remove for real — `SharedCriterion` has no status field.
-| `run_gaql` | Arbitrary GAQL queries for anything else |
 
 > **Brand targeting** — brand criteria (brand lists, brand exclusions) target a brand's **Commercial Knowledge Graph ID**, not its display name. Use `suggest_brands` for a single name or `check_brand_names` for a shortlist to get the ID; `exact_match` marks a candidate whose name matches apart from case and punctuation, everything else is a Google suggestion.
 

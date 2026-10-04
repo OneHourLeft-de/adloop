@@ -381,6 +381,51 @@ class TestBrandListDrafts:
 
         assert "must be a numeric ID" in " ".join(result["details"])
 
+    def test_a_brand_name_instead_of_a_mid_warns(self, config):
+        """The likeliest mistake: a name straight out of a search result.
+
+        Blocking would be wrong (customer-scoped IDs are not MIDs either), so
+        the preview says it instead.
+        """
+        result = write.propose_brand_list(
+            config, list_name="L", brand_ids=["NoWayOut", "/m/1"]
+        )
+
+        warnings = result["changes"]["warnings"]
+        assert any("NoWayOut" in w and "MID" in w for w in warnings)
+
+    def test_real_mids_do_not_warn(self, config):
+        result = write.propose_brand_list(
+            config, list_name="L", brand_ids=["/m/01n5j", "/g/11c1xyz"]
+        )
+
+        assert "warnings" not in result["changes"]
+
+    def test_add_to_brand_list_warns_too(self, config):
+        result = write.add_to_brand_list(
+            config, shared_set_id="42", brand_ids=["MysteryRooms"]
+        )
+
+        assert any("MID" in w for w in result["changes"]["warnings"])
+
+    def test_attach_needs_a_real_campaign_id_not_just_a_non_empty_list(
+        self, config
+    ):
+        """A list with only blank entries used to pass and plan nothing."""
+        result = write.attach_brand_list_to_campaigns(
+            config, shared_set_id="42", campaign_ids=["", "  "]
+        )
+
+        assert "At least one campaign_id is required" in result["details"]
+
+    def test_propose_brand_list_still_allows_no_campaigns(self, config):
+        result = write.propose_brand_list(
+            config, list_name="L", brand_ids=["/m/1"], campaign_ids=["", ""]
+        )
+
+        assert result["status"] == "PENDING_CONFIRMATION"
+        assert result["changes"]["campaign_ids"] == []
+
     def test_remove_from_brand_list_validates_criterion_ids(self, config):
         plan = write.remove_from_brand_list(
             config, shared_set_id="42", criterion_ids=["7"]
@@ -429,6 +474,7 @@ class _FakeWriteClient:
         self.shared_set_operations = []
         self.criterion_requests = []
         self.campaign_criterion_requests = []
+        self.google_ads_requests = []
         self.queries = []
         self._search_rows = search_rows or []
         self._criterion_results = criterion_results
@@ -450,7 +496,11 @@ class _FakeWriteClient:
                     f"customers/{cid}/campaigns/{campaign_id}"
                 )
             ),
-            "GoogleAdsService": SimpleNamespace(search=self._search),
+            "GoogleAdsService": SimpleNamespace(
+                search=self._search,
+                mutate=self._mutate,
+                shared_set_path=lambda cid, sid: f"customers/{cid}/sharedSets/{sid}",
+            ),
         }
 
     def get_service(self, name):
@@ -465,6 +515,37 @@ class _FakeWriteClient:
                 )
             ]
         )
+
+    def _mutate(self, request):
+        """Answer a GoogleAdsService.mutate with one result per operation."""
+        self.google_ads_requests.append(request)
+        entries = []
+        criteria = 0
+        for operation in request.mutate_operations:
+            kind = operation._pb.WhichOneof("operation")
+            if kind == "shared_set_operation":
+                entries.append(
+                    SimpleNamespace(
+                        shared_set_result=SimpleNamespace(
+                            resource_name=(
+                                f"customers/{request.customer_id}/sharedSets/999"
+                            )
+                        )
+                    )
+                )
+            elif kind == "shared_criterion_operation":
+                entries.append(
+                    SimpleNamespace(
+                        shared_criterion_result=SimpleNamespace(
+                            resource_name=(
+                                f"customers/{request.customer_id}"
+                                f"/sharedCriteria/999~{criteria}"
+                            )
+                        )
+                    )
+                )
+                criteria += 1
+        return SimpleNamespace(mutate_operation_responses=entries)
 
     def _mutate_shared_criteria(self, customer_id=None, operations=None, request=None):
         if request is not None:
@@ -514,21 +595,59 @@ class TestBrandListAppliers:
             },
         )
 
-        shared_set = client.shared_set_operations[0].create
+        # One request, not a create-then-fill pair.
+        request = client.google_ads_requests[0]
+        assert len(client.google_ads_requests) == 1
+        shared_set = request.mutate_operations[0].shared_set_operation.create
         assert shared_set.name == "Competitors"
         assert shared_set.type_ == client.enums.SharedSetTypeEnum.BRANDS
 
-        criteria = client.criterion_requests[0]
-        assert [op.create.brand.entity_id for op in criteria] == ["/m/1", "/m/2"]
+        criteria = list(request.mutate_operations[1:])
+        assert [op.shared_criterion_operation.create.brand.entity_id for op in criteria] == [
+            "/m/1",
+            "/m/2",
+        ]
+        # The criteria point at the temporary name of the set created above.
         assert all(
-            op.create.shared_set == "customers/1234567890/sharedSets/999"
+            op.shared_criterion_operation.create.shared_set
+            == "customers/1234567890/sharedSets/-1"
             for op in criteria
         )
+        assert getattr(request, "partial_failure", False) is False
 
         assert result["shared_set_resource"] == "customers/1234567890/sharedSets/999"
         assert result["brand_count"] == 2
+        assert result["criterion_resource_names"] == [
+            "customers/1234567890/sharedCriteria/999~0",
+            "customers/1234567890/sharedCriteria/999~1",
+        ]
         assert "attachment" not in result
 
+    def test_create_brand_list_reports_a_rejected_request_as_a_whole(self):
+        client = _FakeWriteClient()
+
+        def _boom(request):
+            client.google_ads_requests.append(request)
+            raise RuntimeError("brand 999 is unknown")
+
+        client.get_service("GoogleAdsService").mutate = _boom
+
+        result = write._apply_create_brand_list(
+            client,
+            "1234567890",
+            {
+                "list_name": "Competitors",
+                "brand_ids": ["/m/1"],
+                "campaign_ids": [],
+                "negative": True,
+            },
+        )
+
+        assert result["partial_failure"] is True
+        assert result["failed_step"] == "create_brand_list"
+        assert result["shared_set_resource"] is None
+        assert result["completed_steps"] == []
+        assert "brand 999 is unknown" in result["error"]
     def test_create_brand_list_attaches_with_the_negative_flag(self):
         client = _FakeWriteClient()
 

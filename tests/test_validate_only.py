@@ -127,6 +127,30 @@ def test_steps_that_build_on_an_earlier_step_are_skipped_not_sent():
     assert (client.validated_calls, client.skipped_calls) == (1, 2)
 
 
+def test_a_brand_list_is_validated_as_a_whole_in_one_call():
+    """Unlike the keyword list, the brand list is create-and-fill in one
+    request: the criteria use the temporary name, so the dry run checks the
+    real thing instead of a shared set nobody will ever see."""
+    fake = FakeAdsClient()
+    client = ValidateOnlyClient(fake)
+
+    result = write._apply_create_brand_list(client, "123", {
+        "list_name": "Competitors",
+        "brand_ids": ["/m/1", "/m/2"],
+        "campaign_ids": ["42"],
+        "negative": True,
+    })
+
+    # One validated call for set + criteria; only the campaign attachment is
+    # skipped (it references the set Google never created in a dry run).
+    assert [m for _, m, _ in fake.calls] == ["mutate"]
+    request = fake.calls[0][2]
+    assert request.validate_only is True
+    assert len(request.mutate_operations) == 3
+    assert (client.validated_calls, client.skipped_calls) == (1, 1)
+    assert PLACEHOLDER in result["shared_set_resource"]
+
+
 def test_a_partial_failure_in_validation_raises():
     fake = FakeAdsClient(partial_failure=SimpleNamespace(code=3, message="campaign not found"))
     client = ValidateOnlyClient(fake)

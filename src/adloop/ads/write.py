@@ -986,25 +986,38 @@ def _normalize_shared_set_attachment_args(
             "shared_set_id must be a numeric ID (from get_negative_keyword_lists)"
         )
 
-    campaign_ids = campaign_ids or []
-    if not campaign_ids:
+    campaign_errors, deduped = _normalize_campaign_ids(campaign_ids)
+    errors.extend(campaign_errors)
+    # Only complain about an empty list when the ids themselves were fine —
+    # "campaign_id 'x' must be numeric" is the more useful answer otherwise.
+    if not deduped and not campaign_errors:
         errors.append("At least one campaign_id is required")
-
-    seen: set[str] = set()
-    deduped: list[str] = []
-    for cid in campaign_ids:
-        cid_str = str(cid).strip()
-        if not cid_str:
-            continue
-        if not cid_str.isdigit():
-            errors.append(f"campaign_id '{cid_str}' must be numeric")
-            continue
-        if cid_str in seen:
-            continue
-        seen.add(cid_str)
-        deduped.append(cid_str)
-
     return errors, deduped
+
+
+def _normalize_campaign_ids(
+    campaign_ids: list[str] | None,
+) -> tuple[list[str], list[str]]:
+    """Trim, drop blanks, de-duplicate and require digits. Returns (errors, ids).
+
+    No minimum: whether an empty list is an error depends on the caller
+    (attaching needs at least one campaign, creating a list does not).
+    """
+    errors: list[str] = []
+    seen: set[str] = set()
+    cleaned: list[str] = []
+    for raw in campaign_ids or []:
+        value = str(raw).strip()
+        if not value:
+            continue
+        if not value.isdigit():
+            errors.append(f"campaign_id '{value}' must be numeric")
+            continue
+        if value in seen:
+            continue
+        seen.add(value)
+        cleaned.append(value)
+    return errors, cleaned
 
 
 def attach_shared_set_to_campaigns(
@@ -1128,6 +1141,29 @@ def _normalize_brand_ids(brand_ids: list[str] | None) -> tuple[list[str], list[s
         errors.append("At least one brand_id is required")
     return errors, deduped
 
+
+def _brand_id_warnings(brand_ids: list[str]) -> list[str]:
+    """Warn about values that do not look like a Commercial KG MID.
+
+    The most common mistake is passing a brand *name* straight from a search
+    result. The API rejects that at apply time with a message that does not
+    mention names, so the preview says it up front instead of blocking: a
+    customer-scoped brand ID (UNVERIFIED/APPROVED) may legitimately be
+    something else.
+    """
+    suspicious = [b for b in brand_ids if not b.startswith(("/m/", "/g/"))]
+    if not suspicious:
+        return []
+    shown = ", ".join(f"'{b}'" for b in suspicious[:5])
+    more = "" if len(suspicious) <= 5 else f" (+{len(suspicious) - 5} more)"
+    return [
+        f"{len(suspicious)} brand_id(s) do not look like a Commercial KG MID "
+        f"(/m/… or /g/…): {shown}{more}. If these are brand names, resolve them "
+        "with suggest_brands or check_brand_names first — a display name cannot "
+        "be written."
+    ]
+
+
 def _normalize_criterion_ids(criterion_ids: list[str] | None) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     seen: set[str] = set()
@@ -1188,16 +1224,10 @@ def propose_brand_list(
         errors.append("list_name is required")
     brand_errors, deduped_brands = _normalize_brand_ids(brand_ids)
     errors.extend(brand_errors)
+    warnings = _brand_id_warnings(deduped_brands)
 
-    attachment_errors, deduped_campaigns = _normalize_shared_set_attachment_args(
-        "0" if not campaign_ids else "1", campaign_ids
-    )
-    # No campaigns is valid here (list without attachment) — only keep the
-    # per-campaign-id problems, not the "at least one campaign" complaint.
-    errors.extend(
-        err for err in attachment_errors
-        if not err.startswith("At least one campaign_id")
-    )
+    campaign_errors, deduped_campaigns = _normalize_campaign_ids(campaign_ids)
+    errors.extend(campaign_errors)
     if errors:
         return {"error": "Validation failed", "details": errors}
 
@@ -1213,6 +1243,8 @@ def propose_brand_list(
             "negative": bool(negative),
         },
     )
+    if warnings:
+        plan.changes["warnings"] = warnings
     store_plan(plan)
     return plan.to_preview()
 
@@ -1257,6 +1289,9 @@ def add_to_brand_list(
         customer_id=customer_id,
         changes={"shared_set_id": shared_set_id, "brand_ids": deduped_brands},
     )
+    warnings = _brand_id_warnings(deduped_brands)
+    if warnings:
+        plan.changes["warnings"] = warnings
     store_plan(plan)
     return plan.to_preview()
 
@@ -4697,50 +4732,64 @@ def _attach_brand_list_resource(
     return out
 
 def _apply_create_brand_list(client: object, cid: str, changes: dict) -> dict:
-    """Create a BRANDS shared set, fill it, optionally attach it to campaigns.
+    """Create a BRANDS shared set and fill it — one atomic mutate.
 
-    Three sequential API calls. A failure reports which steps already ran so
-    the caller can clean up or continue from there instead of guessing.
+    The set is created under the temporary resource name
+    ``customers/{cid}/sharedSets/-1`` and the brand criteria reference that same
+    name; Google replaces the negative ID inside the single request, so either
+    the complete list exists or nothing does. The two-call version this replaces
+    could leave an empty list behind when one brand ID was rejected — and it
+    could not be dry-run at all, because the second call referenced a shared set
+    that did not exist yet.
+
+    Attaching to campaigns is a different entity type (CampaignCriterion) and
+    therefore stays a second call; when it fails the list itself is reported as
+    created rather than pretending nothing happened.
     """
+    google_ads_service = client.get_service("GoogleAdsService")
+    shared_set_resource = google_ads_service.shared_set_path(cid, "-1")
+
+    ss_op = client.get_type("SharedSetOperation")
+    ss_op.create.name = changes["list_name"]
+    ss_op.create.type_ = client.enums.SharedSetTypeEnum.BRANDS
+
+    # Order matters: the criteria can only reference the temporary name after
+    # the operation that defines it, and no partial_failure here — this request
+    # is meant to be all-or-nothing.
+    create_set = client.get_type("MutateOperation")
+    create_set.shared_set_operation = ss_op
+    operations = [create_set]
+    for criterion_op in _brand_list_criterion_operations(
+        client, shared_set_resource, changes["brand_ids"]
+    ):
+        wrapper = client.get_type("MutateOperation")
+        wrapper.shared_criterion_operation = criterion_op
+        operations.append(wrapper)
+
+    request = client.get_type("MutateGoogleAdsRequest")
+    request.customer_id = cid
+    request.mutate_operations.extend(operations)
     try:
-        shared_set_service = client.get_service("SharedSetService")
-        ss_op = client.get_type("SharedSetOperation")
-        shared_set = ss_op.create
-        shared_set.name = changes["list_name"]
-        shared_set.type_ = client.enums.SharedSetTypeEnum.BRANDS
-        ss_response = shared_set_service.mutate_shared_sets(
-            customer_id=cid, operations=[ss_op]
-        )
-        shared_set_resource = ss_response.results[0].resource_name
+        response = google_ads_service.mutate(request=request)
     except Exception as exc:
         return {
             "partial_failure": True,
             "shared_set_resource": None,
             "completed_steps": [],
-            "failed_step": "create_shared_set",
+            "failed_step": "create_brand_list",
             "error": _extract_error_message(exc),
         }
 
-    try:
-        sc_service = client.get_service("SharedCriterionService")
-        operations = _brand_list_criterion_operations(
-            client, shared_set_resource, changes["brand_ids"]
-        )
-        sc_response = sc_service.mutate_shared_criteria(
-            customer_id=cid, operations=operations
-        )
-        criterion_resource_names = [r.resource_name for r in sc_response.results]
-    except Exception as exc:
-        return {
-            "partial_failure": True,
-            "shared_set_resource": shared_set_resource,
-            "completed_steps": ["create_shared_set"],
-            "failed_step": "add_brands",
-            "error": _extract_error_message(exc),
-        }
+    responses = list(response.mutate_operation_responses)
+    created_resource = responses[0].shared_set_result.resource_name if responses else ""
+    criterion_resource_names = [
+        entry.shared_criterion_result.resource_name
+        for entry in responses[1:]
+        if entry.shared_criterion_result.resource_name
+    ]
 
     out = {
-        "shared_set_resource": shared_set_resource,
+        "shared_set_resource": created_resource,
         "brand_count": len(criterion_resource_names),
         "criterion_resource_names": criterion_resource_names,
     }
@@ -4750,14 +4799,14 @@ def _apply_create_brand_list(client: object, cid: str, changes: dict) -> dict:
         attachment = _attach_brand_list_resource(
             client,
             cid,
-            shared_set_resource,
+            created_resource,
             campaign_ids,
             bool(changes.get("negative", True)),
         )
         out["attachment"] = attachment
         if attachment.get("partial_failure"):
             out["partial_failure"] = True
-            out["completed_steps"] = ["create_shared_set", "add_brands"]
+            out["completed_steps"] = ["create_brand_list"]
             out["failed_step"] = "attach_to_campaigns"
     return out
 
