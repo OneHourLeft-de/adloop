@@ -1804,7 +1804,7 @@ class TestCsvInputHardening:
         # hosted runtime that first line can be any readable file's first line.
         path = self._write(tmp_path, "SECRET-COLUMN-NAME\n1,2,3\n")
 
-        rows, errors = conversion_actions._read_upload_csv(path)
+        rows, errors, _tz = conversion_actions._read_upload_csv(path)
         assert rows                      # readable
         _, errors = conversion_actions._column_map(rows[0][1], ["Expected A"])
         assert errors and "SECRET-COLUMN-NAME" not in " ".join(errors)
@@ -1812,17 +1812,17 @@ class TestCsvInputHardening:
 
     def test_non_csv_suffix_is_refused(self, tmp_path):
         path = self._write(tmp_path, "a,b\n", name="upload.txt")
-        _, errors = conversion_actions._read_upload_csv(path)
+        _, errors, _tz = conversion_actions._read_upload_csv(path)
         assert "must be a .csv file" in errors[0]
 
     def test_directory_is_refused(self, tmp_path):
-        _, errors = conversion_actions._read_upload_csv(str(tmp_path))
+        _, errors, _tz = conversion_actions._read_upload_csv(str(tmp_path))
         assert "not a regular file" in errors[0]
 
     def test_oversized_file_is_refused_before_reading(self, tmp_path, monkeypatch):
         path = self._write(tmp_path, "a,b\n")
         monkeypatch.setattr(conversion_actions, "_MAX_CSV_BYTES", 2)
-        _, errors = conversion_actions._read_upload_csv(path)
+        _, errors, _tz = conversion_actions._read_upload_csv(path)
         assert "MB" in errors[0] and "2,000 rows" in errors[0]
 
     def test_bom_and_comment_rows_are_tolerated(self, tmp_path):
@@ -2609,7 +2609,7 @@ class TestRecordStartLine:
               "2026-03-01T13:00:00Z,10,USD\n"      # line 4
         )
 
-        records, errors = conversion_actions._read_upload_csv(str(path))
+        records, errors, _tz = conversion_actions._read_upload_csv(str(path))
 
         assert errors == []
         assert [line for line, _ in records] == [1, 2, 4]
@@ -2798,3 +2798,88 @@ class TestPhoneNormalizationInTheDraft:
         row = _stored_plan(result).apply_only_payload["rows"][0]
 
         assert row["phone_sha256"] == conversion_actions._sha256_hex("+4989123456")
+
+
+class TestTimestampsAndTimeZones:
+    """Google wants `yyyy-mm-dd hh:mm:ss±hh:mm`; the draft has to produce it."""
+
+    def _call_draft(self, config, tmp_path, monkeypatch, body: str, **kwargs):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CALLS")
+        path = tmp_path / "phone.csv"
+        path.write_text(body)
+        return conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", csv_path=str(path), **kwargs
+        )
+
+    def _row(self, start: str, converted: str) -> str:
+        return f"+14155550142,{start},My Action,{converted},10,USD\n"
+
+    def test_iso_with_offset_is_converted_to_the_api_format(
+        self, config, tmp_path, monkeypatch
+    ):
+        result = self._call_draft(
+            config, tmp_path, monkeypatch,
+            _CALL_HEADER + self._row("2026-03-01T12:00:00Z", "2026-03-01T13:00:00Z"),
+        )
+        row = _stored_plan(result).apply_only_payload["rows"][0]
+
+        assert row["call_start_time"] == "2026-03-01 12:00:00+00:00"
+        assert row["conversion_time"] == "2026-03-01 13:00:00+00:00"
+
+    def test_a_timezone_row_resolves_german_timestamps(
+        self, config, tmp_path, monkeypatch
+    ):
+        result = self._call_draft(
+            config, tmp_path, monkeypatch,
+            "Parameters:TimeZone=Europe/Berlin,,,,,\n"
+            + _CALL_HEADER + self._row("01.03.2026 12:00", "01.03.2026 13:30"),
+        )
+        row = _stored_plan(result).apply_only_payload["rows"][0]
+
+        assert row["call_start_time"] == "2026-03-01 12:00:00+01:00"
+        assert row["conversion_time"] == "2026-03-01 13:30:00+01:00"
+
+    def test_without_an_offset_or_a_timezone_row_the_row_is_refused(
+        self, config, tmp_path, monkeypatch
+    ):
+        result = self._call_draft(
+            config, tmp_path, monkeypatch,
+            _CALL_HEADER + self._row("01.03.2026 12:00", "01.03.2026 13:00"),
+        )
+
+        # A row whose time cannot be resolved is a parsing problem, so it is
+        # reported as one — with the physical line.
+        assert "CSV parse failed" in result["error"]
+        details = " ".join(result["details"])
+        assert "Row 2" in details and "time zone" in details
+
+    def test_a_us_date_format_is_recognized(self, config, tmp_path, monkeypatch):
+        result = self._call_draft(
+            config, tmp_path, monkeypatch,
+            "Parameters:TimeZone=UTC,,,,,\n"
+            + _CALL_HEADER + self._row("3/1/2026 12:00 PM", "3/1/2026 1:00 PM"),
+        )
+        row = _stored_plan(result).apply_only_payload["rows"][0]
+
+        assert row["call_start_time"] == "2026-03-01 12:00:00+00:00"
+
+    def test_a_conversion_before_the_call_is_refused(
+        self, config, tmp_path, monkeypatch
+    ):
+        result = self._call_draft(
+            config, tmp_path, monkeypatch,
+            _CALL_HEADER + self._row("2026-03-01T13:00:00Z", "2026-03-01T12:00:00Z"),
+        )
+
+        assert "CSV parse failed" in result["error"]
+        assert "before Call Start Time" in " ".join(result["details"])
+
+    def test_a_conversion_in_the_future_is_refused(
+        self, config, tmp_path, monkeypatch
+    ):
+        result = self._call_draft(
+            config, tmp_path, monkeypatch,
+            _CALL_HEADER + self._row("2099-03-01T12:00:00Z", "2099-03-01T13:00:00Z"),
+        )
+
+        assert "future" in " ".join(result["details"])

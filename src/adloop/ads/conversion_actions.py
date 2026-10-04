@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from datetime import datetime, timezone as _tz
 from typing import TYPE_CHECKING
 
 from adloop.ads.enums import enum_names
@@ -718,29 +719,61 @@ _EXPECTED_CALL_HEADERS = [
 ]
 
 
-def _normalize_call_timestamp(ts: str) -> str:
-    """Google Ads API wants 'yyyy-mm-dd HH:MM:SS+|-HH:MM'.
+_TIMESTAMP_FORMATS = (
+    "%d.%m.%Y %H:%M:%S",
+    "%d.%m.%Y %H:%M",
+    "%m/%d/%Y %I:%M:%S %p",
+    "%m/%d/%Y %I:%M %p",
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d %H:%M",
+)
 
-    Our CSV writes ISO 8601 with 'T' separator and trailing 'Z'
-    (e.g. '2026-02-26T16:49:44.567Z'). Convert: strip fractional
-    seconds, replace 'T' with space, replace 'Z' with '+00:00'.
+
+def _parse_timestamp(value: str, default_tz: str) -> tuple[str, str]:
+    """Parse a CSV timestamp; returns ``(api_value, problem)``.
+
+    Google wants ``yyyy-mm-dd hh:mm:ss±hh:mm``. Accepted input: ISO 8601 (with
+    or without offset/``Z``), German ``dd.mm.yyyy hh:mm[:ss]`` and US
+    ``mm/dd/yyyy hh:mm[:ss] [AM/PM]`` — the dot/slash separator is what tells
+    the last two apart.
+
+    A value without an offset needs a time zone: Google's own template ships a
+    ``Parameters:TimeZone=…`` row for exactly that, and without one the row is
+    refused instead of being uploaded against the server's idea of local time.
     """
-    s = (ts or "").strip()
-    if not s:
-        return s
-    if "." in s:
-        head, tail = s.split(".", 1)
-        tz = ""
-        for marker in ("+", "-", "Z"):
-            idx = tail.find(marker)
-            if idx >= 0:
-                tz = tail[idx:]
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    raw = (value or "").strip()
+    if not raw:
+        return "", "is empty"
+
+    text = raw[:-1] + "+00:00" if raw.endswith(("Z", "z")) else raw
+    parsed = None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        for fmt in _TIMESTAMP_FORMATS:
+            try:
+                parsed = datetime.strptime(text, fmt)
                 break
-        s = head + (tz or "")
-    s = s.replace("T", " ")
-    if s.endswith("Z"):
-        s = s[:-1] + "+00:00"
-    return s
+            except ValueError:
+                continue
+    if parsed is None:
+        return "", "is not a recognized timestamp"
+
+    if parsed.tzinfo is None:
+        if not default_tz:
+            return "", (
+                "has no time zone — add a 'Parameters:TimeZone=…' row to the "
+                "CSV, or give the timestamp an offset"
+            )
+        try:
+            parsed = parsed.replace(tzinfo=ZoneInfo(default_tz))
+        except Exception:  # noqa: BLE001 — unknown zone from the CSV
+            return "", f"uses an unknown time zone ({default_tz})"
+
+    return parsed.isoformat(sep=" ", timespec="seconds"), ""
 
 
 # Google's own upload templates start with a "Parameters:TimeZone=..." row and
@@ -748,12 +781,13 @@ def _normalize_call_timestamp(ts: str) -> str:
 _CSV_SKIP_PREFIXES = ("Parameters:", "#")
 
 # A 2,000-row upload — the API's per-request cap — is well under 1 MB. The cap
-# only stops a stray multi-gigabyte path from being read into memory; it is not
-# a row limit.
+# only stops a stray multi-gigabyte path from being read into memory.
 _MAX_CSV_BYTES = 5 * 1024 * 1024
 
 
-def _read_upload_csv(csv_path: str) -> tuple[list[tuple[int, list[str]]], list[str]]:
+def _read_upload_csv(
+    csv_path: str,
+) -> tuple[list[tuple[int, list[str]]], list[str], str]:
     """Read an upload CSV into ``(source_line, cells)`` records (header first).
 
     ``source_line`` is the physical line in the file where the record ends —
@@ -772,20 +806,23 @@ def _read_upload_csv(csv_path: str) -> tuple[list[tuple[int, list[str]]], list[s
 
     path = Path(csv_path).expanduser()
     if not path.is_file():
-        return [], [f"CSV not found or not a regular file: {path}"]
+        return [], [f"CSV not found or not a regular file: {path}"], ""
     if path.suffix.lower() != ".csv":
-        return [], [f"CSV must be a .csv file, got: {path.name}"]
+        return [], [f"CSV must be a .csv file, got: {path.name}"], ""
     try:
         size = path.stat().st_size
     except OSError as exc:
-        return [], [f"CSV could not be read: {exc.strerror or exc}"]
+        return [], [f"CSV could not be read: {exc.strerror or exc}"], ""
     if size > _MAX_CSV_BYTES:
         return [], [
             f"CSV is {size / 1_048_576:.1f} MB; the limit is "
             f"{_MAX_CSV_BYTES // 1_048_576} MB. Split the file — Google accepts "
             "at most 2,000 rows per upload request anyway."
-        ]
+        ], ""
 
+    # Google's template carries its time zone in a `Parameters:TimeZone=…` row,
+    # which is what timestamps without an offset are resolved against.
+    timezone = ""
     try:
         with path.open("r", newline="", encoding="utf-8-sig") as handle:
             position = {"line": 0}
@@ -811,17 +848,25 @@ def _read_upload_csv(csv_path: str) -> tuple[list[tuple[int, list[str]]], list[s
                 # A blank record: every cell empty.
                 if not any((cell or "").strip() for cell in record):
                     continue
-                if (record[0] or "").strip().startswith(_CSV_SKIP_PREFIXES):
+                first = (record[0] or "").strip()
+                if first.startswith("Parameters:"):
+                    if not timezone:
+                        for part in first.split(":", 1)[1].split(";"):
+                            key, _, value = part.partition("=")
+                            if key.strip().lower() == "timezone" and value.strip():
+                                timezone = value.strip()
+                    continue
+                if first.startswith("#"):
                     continue
                 records.append((start_line, record))
     except OSError as exc:
-        return [], [f"CSV could not be read: {exc.strerror or exc}"]
+        return [], [f"CSV could not be read: {exc.strerror or exc}"], ""
     except UnicodeDecodeError:
-        return [], ["CSV is not valid UTF-8."]
+        return [], ["CSV is not valid UTF-8."], ""
 
     if not records:
-        return [], ["CSV is empty (no header row found)"]
-    return records, []
+        return [], ["CSV is empty (no header row found)"], ""
+    return records, [], timezone
 
 
 def _column_map(
@@ -855,7 +900,7 @@ def _parse_call_conversion_csv(
     call-to-click matching and it cannot be hashed. The draft stores it in
     ``ChangePlan.apply_only_payload``, which no preview or audit surface shows.
     """
-    records, errors = _read_upload_csv(csv_path)
+    records, errors, timezone = _read_upload_csv(csv_path)
     if errors:
         return [], errors
 
@@ -864,6 +909,7 @@ def _parse_call_conversion_csv(
     if errors:
         return [], errors
 
+    now = datetime.now(_tz.utc)
     out: list[dict] = []
     for source_line, raw in records[1:]:
         try:
@@ -872,18 +918,41 @@ def _parse_call_conversion_csv(
         except (ValueError, IndexError):
             errors.append(f"Row {source_line}: invalid Conversion Value")
             continue
+
+        call_start, problem = _parse_timestamp(raw[col["Call Start Time"]], timezone)
+        if problem:
+            errors.append(f"Row {source_line}: Call Start Time {problem}")
+            continue
+        converted, problem = _parse_timestamp(raw[col["Conversion Time"]], timezone)
+        if problem:
+            errors.append(f"Row {source_line}: Conversion Time {problem}")
+            continue
+
+        start_dt = datetime.fromisoformat(call_start)
+        converted_dt = datetime.fromisoformat(converted)
+        if converted_dt < start_dt:
+            errors.append(
+                f"Row {source_line}: Conversion Time is before Call Start Time"
+            )
+            continue
+        if converted_dt > now:
+            errors.append(f"Row {source_line}: Conversion Time is in the future")
+            continue
+
         raw_caller = raw[col["Caller's Phone Number"]]
         out.append({
             "source_line": source_line,
             "caller_was_given": bool((raw_caller or "").strip()),
             "caller_id": _normalize_phone_e164(raw_caller, default_region),
-            "call_start_time": _normalize_call_timestamp(raw[col["Call Start Time"]]),
+            "call_start_time": call_start,
             "conversion_name": raw[col["Conversion Name"]].strip(),
-            "conversion_time": _normalize_call_timestamp(raw[col["Conversion Time"]]),
+            "conversion_time": converted,
             "conversion_value": value,
             "currency_code": (raw[col["Conversion Currency"]].strip().upper() or "USD"),
         })
     return out, errors
+
+
 def _redact_caller_id(caller_id: str) -> str:
     """Mask an E.164 phone for display/logging: keep the leading digits and
     the last 4, star the middle. e.g. '+15555550142' -> '+155***0142'.
@@ -1354,7 +1423,7 @@ def _parse_ec_for_leads_csv(
     hashes (``*_sha256`` keys) plus non-PII fields — the raw values never
     leave this function.
     """
-    records, errors = _read_upload_csv(csv_path)
+    records, errors, timezone = _read_upload_csv(csv_path)
     if errors:
         return [], errors
 
@@ -1393,6 +1462,16 @@ def _parse_ec_for_leads_csv(
         def _optional(name: str) -> str:
             return raw[optional_col[name]].strip() if name in optional_col else ""
 
+        converted_time, problem = _parse_timestamp(
+            raw[col["Conversion Time"]], timezone
+        )
+        if problem:
+            errors.append(f"Row {source_line}: Conversion Time {problem}")
+            continue
+        if datetime.fromisoformat(converted_time) > datetime.now(_tz.utc):
+            errors.append(f"Row {source_line}: Conversion Time is in the future")
+            continue
+
         country = _optional("Country Code").upper()
         postal = _optional("Postal Code").strip()
         if country and not re.fullmatch(r"[A-Z]{2}", country):
@@ -1418,9 +1497,7 @@ def _parse_ec_for_leads_csv(
             "postal_code": postal,
             "country_code": country,
             "conversion_name": raw[col["Conversion Name"]].strip(),
-            "conversion_time": _normalize_call_timestamp(
-                raw[col["Conversion Time"]]
-            ),
+            "conversion_time": converted_time,
             "conversion_value": value,
             "currency_code": (
                 raw[col["Conversion Currency"]].strip().upper() or "USD"
