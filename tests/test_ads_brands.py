@@ -871,6 +871,8 @@ class TestBrandListSafety:
         )
 
         assert result["requires_double_confirm"] is True
+
+
 class TestStateRanking:
     """The tiers of ``_state_rank`` — pinned so a later edit cannot blur them."""
 
