@@ -24,7 +24,33 @@ if TYPE_CHECKING:
 # shortlist, a competitor shortlist, ...). Longer lists are split by the caller.
 MAX_BRAND_BATCH = 25
 
-_SENTINEL_STATES = {"UNSPECIFIED", "UNKNOWN"}
+# BrandStateEnum values that can actually be targeted: ENABLED is the normal
+# case, UNVERIFIED is customer-scoped but selectable by that customer, and
+# APPROVED is an unverified brand business accepted into the global list.
+#
+# Ranking them together is deliberate — all three can be targeted — but they are
+# not the same thing: ``BrandSuggestion.id`` is documented as "CKG MID for
+# verified/global scoped brands", so for UNVERIFIED/APPROVED the id is a
+# customer-scoped brand id. The state travels in the output; callers that need a
+# sure CKG MID look for ENABLED.
+_USABLE_STATES = {"ENABLED", "UNVERIFIED", "APPROVED"}
+# States whose brand ID is no longer valid. They must never be offered as the
+# best match while a live candidate exists — a dead ID in a brand list is worse
+# than no match at all.
+_DEAD_STATES = {"DEPRECATED", "CANCELLED", "REJECTED"}
+
+
+def _state_rank(state: str) -> int:
+    """0 for usable brands, 1 for dead ones, 2 for states we cannot judge.
+
+    The last bucket also covers UNSPECIFIED/UNKNOWN and any state Google adds
+    later: an unknown state must not outrank a brand known to be good.
+    """
+    if state in _USABLE_STATES:
+        return 0
+    if state in _DEAD_STATES:
+        return 1
+    return 2
 
 
 def suggest_brands(
@@ -173,9 +199,11 @@ def _clean_brand_names(brand_names: list[str] | None) -> list[str]:
 def _best_match(query: str, brands: list[dict[str, Any]]) -> tuple[dict | None, bool]:
     """Pick the suggestion that best answers *query*.
 
-    Ranking is deliberately shallow: an exact name match wins, then brands in
-    a usable state, then Google's own order. Anything deeper would imply a
-    confidence the API does not provide.
+    Ranking is deliberately shallow, but state comes first: a brand Google has
+    retired is never the answer while a live candidate is on the table, even
+    when the retired one matches the query character for character. Within the
+    same state tier an exact name match wins, then Google's own order. Anything
+    deeper would imply a confidence the API does not provide.
     """
     if not brands:
         return None, False
@@ -184,8 +212,8 @@ def _best_match(query: str, brands: list[dict[str, Any]]) -> tuple[dict | None, 
     ranked = sorted(
         brands,
         key=lambda brand: (
+            _state_rank(brand["state"]),
             0 if _normalize(brand["name"]) == normalized else 1,
-            0 if brand["state"] not in _SENTINEL_STATES else 1,
         ),
     )
     best = ranked[0]
