@@ -373,7 +373,11 @@ def get_search_terms(
     """Get search terms report — what users actually typed before clicking ads."""
     from adloop.ads.gaql import execute_query
 
-    date_clause = _date_clause(date_range_start, date_range_end)
+    # search_term_view requires an explicit date segment, so the default is
+    # DURING LAST_30_DAYS and a given range replaces it. ``_date_clause``
+    # prefixes its fragment with AND (the other read tools append it to a
+    # WHERE); here it is the only predicate, so the AND comes off.
+    where = _date_clause(date_range_start, date_range_end).removeprefix("AND ")
 
     query = f"""
         SELECT search_term_view.search_term,
@@ -381,35 +385,10 @@ def get_search_terms(
                metrics.impressions, metrics.clicks,
                metrics.cost_micros, metrics.conversions
         FROM search_term_view
-        WHERE segments.date DURING LAST_30_DAYS
-          {f"AND segments.date BETWEEN '{date_range_start}' AND '{date_range_end}'" if date_range_start and date_range_end else ""}
+        WHERE {where}
         ORDER BY metrics.clicks DESC
         LIMIT 200
     """
-    # search_term_view requires an explicit date segment, so we always
-    # include DURING LAST_30_DAYS as baseline and override if dates given.
-    if date_range_start and date_range_end:
-        query = f"""
-            SELECT search_term_view.search_term,
-                   campaign.name, ad_group.name,
-                   metrics.impressions, metrics.clicks,
-                   metrics.cost_micros, metrics.conversions
-            FROM search_term_view
-            WHERE segments.date BETWEEN '{date_range_start}' AND '{date_range_end}'
-            ORDER BY metrics.clicks DESC
-            LIMIT 200
-        """
-    else:
-        query = """
-            SELECT search_term_view.search_term,
-                   campaign.name, ad_group.name,
-                   metrics.impressions, metrics.clicks,
-                   metrics.cost_micros, metrics.conversions
-            FROM search_term_view
-            WHERE segments.date DURING LAST_30_DAYS
-            ORDER BY metrics.clicks DESC
-            LIMIT 200
-        """
 
     rows = execute_query(config, customer_id, query)
     currency_code = get_currency_code(config, customer_id)
