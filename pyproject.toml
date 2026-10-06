@@ -10,7 +10,7 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 keywords = ["mcp", "google-ads", "reddit-ads", "google-analytics", "ga4", "cursor", "marketing"]
 dependencies = [
-    "fastmcp>=3.0.0",
+    "fastmcp>=4.0",
     "google-ads>=32.0.0",
     "google-analytics-data>=0.20.0",
     "google-analytics-admin>=0.27.0",
