@@ -227,7 +227,7 @@ All write operations follow a **draft → preview → confirm** workflow. Nothin
 | `draft_responsive_search_ad` | Create RSA preview (3-15 headlines ≤30 chars, 2-4 descriptions ≤90 chars). Warns if headline/description count is below best practice. |
 | `draft_callouts` | Create campaign callout assets from 1-25 character text snippets. |
 | `draft_structured_snippets` | Create campaign structured snippet assets using official header values and 3-10 snippet values. |
-| `draft_image_assets` | Create campaign image assets from local PNG, JPEG, or GIF files. |
+| `draft_image_assets` | Create campaign image assets from local files or public image URLs (PNG, JPEG, or GIF). |
 | `draft_keywords` | Propose keyword additions with match types. Proactively checks bidding strategy — blocks BROAD match on Manual CPC campaigns. |
 | `add_negative_keywords` | Propose negative keywords directly on a campaign |
 | `add_negative_locations` | Propose negative geo exclusions on a campaign — exclude cities/regions while keeping broader positive targets |

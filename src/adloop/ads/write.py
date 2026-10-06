@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import struct
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -209,7 +209,9 @@ def _ssrf_error(url: str) -> str | None:
     Note: the fetch re-resolves DNS after this check, so a hostile DNS
     server could still rebind between check and fetch — acceptable here
     because the fetch result is only an up/down signal, never returned
-    to the caller.
+    to the caller. Fetches whose bytes ARE used (image assets) go through
+    ``adloop.ads.image_fetch``, which pins the connection to the checked
+    address.
     """
     import ipaddress
     import socket
@@ -238,15 +240,10 @@ def _ssrf_error(url: str) -> str | None:
             ipaddress.ip_address(info[4][0]) for info in addr_info
         ]
 
+    from adloop.ads.image_fetch import non_public_reason
+
     for addr in addresses:
-        if (
-            addr.is_private
-            or addr.is_loopback
-            or addr.is_link_local
-            or addr.is_multicast
-            or addr.is_reserved
-            or addr.is_unspecified
-        ):
+        if non_public_reason(addr) is not None:
             return (
                 f"URL resolves to a non-public address ({addr}) — "
                 "refusing to fetch"
@@ -383,10 +380,67 @@ def _parse_image_metadata(path_str: str) -> dict[str, object]:
         "mime_type": mime_type,
         "width": width,
         "height": height,
+        "size_kb": _size_kb(data),
     }
 
 
-def _build_image_asset_name(path: Path, data: bytes) -> str:
+def _parse_image_url_metadata(url: str) -> dict[str, object]:
+    """Fetch an image URL safely and return metadata used for asset creation.
+
+    The bytes themselves are NOT returned: plans are persisted, so only a
+    sha256 of the approved bytes is kept. Apply re-fetches the URL and
+    refuses if the digest no longer matches.
+    """
+    from adloop.ads.image_fetch import fetch_image_bytes
+
+    fetched = fetch_image_bytes(url)
+    mime_type, width, height = _detect_image_type_and_size(fetched.data)
+    return {
+        "url": url,
+        "sha256": fetched.sha256,
+        "name": _build_image_asset_name(_url_path(url), fetched.data),
+        "mime_type": mime_type,
+        "width": width,
+        "height": height,
+        "size_kb": _size_kb(fetched.data),
+    }
+
+
+def _fetch_approved_image_url(payload: dict) -> bytes:
+    """Re-fetch a URL image at apply time and check it is the previewed one."""
+    from adloop.ads.image_fetch import fetch_image_bytes
+
+    url = str(payload["url"])
+    fetched = fetch_image_bytes(url)
+    if fetched.sha256 != payload.get("sha256"):
+        raise ValueError(
+            f"The image at {url} changed since the preview; draft again."
+        )
+    return fetched.data
+
+
+def _url_path(url: str) -> PurePosixPath:
+    """The URL's path, so asset names use its file stem like local images do."""
+    from urllib.parse import unquote, urlsplit
+
+    return PurePosixPath(unquote(urlsplit(url).path))
+
+
+def _size_kb(data: bytes) -> float:
+    return round(len(data) / 1024, 1)
+
+
+def _describe_image(image: dict[str, object]) -> str:
+    """One preview line: source, type, dimensions and size."""
+    source = image.get("url") or image.get("path")
+    kind = str(image.get("mime_type", "")).removeprefix("image/").upper()
+    return (
+        f"{source} — {kind} {image.get('width')}x{image.get('height')}, "
+        f"{image.get('size_kb')} KB"
+    )
+
+
+def _build_image_asset_name(path: PurePath, data: bytes) -> str:
     """Build a deterministic asset name required by Google Ads image assets."""
     digest = hashlib.sha1(data).hexdigest()[:12]
     stem = path.stem.strip() or "image"
@@ -394,7 +448,7 @@ def _build_image_asset_name(path: Path, data: bytes) -> str:
 
 
 def _detect_image_type_and_size(data: bytes) -> tuple[str, int, int]:
-    """Return MIME type plus width/height for supported local image files."""
+    """Return MIME type plus width/height, sniffed from the bytes alone."""
     if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24:
         width, height = struct.unpack(">II", data[16:24])
         return "image/png", width, height
@@ -439,7 +493,7 @@ def _detect_image_type_and_size(data: bytes) -> tuple[str, int, int]:
             index += segment_length
 
     raise ValueError(
-        "Unsupported image type. Use a local PNG, JPEG, or GIF file."
+        "Unsupported image type. Use a PNG, JPEG, or GIF image."
     )
 
 
@@ -2402,18 +2456,27 @@ def draft_image_assets(
     customer_id: str = "",
     campaign_id: str = "",
     image_paths: list[str] | None = None,
+    image_urls: list[str] | None = None,
 ) -> dict:
-    """Draft campaign image assets from local files."""
+    """Draft campaign image assets from local files and/or public image URLs.
+
+    URL images are fetched now (public addresses only, pinned against DNS
+    rebinding, capped at Google's 5120 KB limit) and their sha256 is kept
+    in the plan; apply re-fetches and refuses if the bytes changed.
+    """
     from adloop.runtime import deployment_mode
     from adloop.safety.guards import SafetyViolation, check_blocked_operation
     from adloop.safety.preview import ChangePlan, store_plan
 
-    if deployment_mode() == "server":
+    image_paths = list(image_paths or [])
+    image_urls = list(image_urls or [])
+
+    if image_paths and deployment_mode() == "server":
         return {
             "error": (
-                "draft_image_assets reads image files from the local "
-                "filesystem and is not available on the hosted server. "
-                "Use the self-hosted AdLoop MCP server for image assets."
+                "image_paths can't be used here: local file paths aren't "
+                "available on a hosted server; pass image_urls (public "
+                "https/http links to PNG, JPEG or GIF images) instead."
             )
         }
 
@@ -2422,7 +2485,9 @@ def draft_image_assets(
     except SafetyViolation as e:
         return {"error": str(e)}
 
-    validated_images, errors = _validate_image_assets(campaign_id, image_paths or [])
+    validated_images, errors = _validate_image_assets(
+        campaign_id, image_paths, image_urls
+    )
     if errors:
         return {"error": "Validation failed", "details": errors}
 
@@ -2434,6 +2499,7 @@ def draft_image_assets(
         changes={
             "campaign_id": campaign_id,
             "images": validated_images,
+            "summary": [_describe_image(image) for image in validated_images],
         },
     )
     store_plan(plan)
@@ -3018,21 +3084,28 @@ def _validate_structured_snippets(
 
 
 def _validate_image_assets(
-    campaign_id: str, image_paths: list[str]
+    campaign_id: str, image_paths: list[str], image_urls: list[str] | None = None
 ) -> tuple[list[dict[str, object]], list[str]]:
     errors = []
     validated = []
+    image_urls = image_urls or []
 
     if not campaign_id:
         errors.append("campaign_id is required")
-    if not image_paths:
-        errors.append("At least one image path is required")
+    if not image_paths and not image_urls:
+        errors.append("At least one image (image_paths or image_urls) is required")
 
     for index, image_path in enumerate(image_paths):
         try:
             validated.append(_parse_image_metadata(image_path))
         except ValueError as exc:
             errors.append(f"Image {index + 1}: {exc}")
+
+    for index, image_url in enumerate(image_urls):
+        try:
+            validated.append(_parse_image_url_metadata(image_url))
+        except ValueError as exc:
+            errors.append(f"Image URL {index + 1} ({image_url}): {exc}")
 
     return validated, errors
 
@@ -4576,13 +4649,30 @@ def _apply_create_structured_snippets(
 
 
 def _apply_create_image_assets(client: object, cid: str, changes: dict) -> dict:
-    """Create image assets from local files and link them to a campaign."""
+    """Create image assets from local files or URLs and link them to a campaign.
+
+    URL images are re-fetched through the same safe fetcher and must match
+    the sha256 approved in the preview.
+    """
+
+    from adloop.runtime import deployment_mode
 
     def populate(asset: object, payload: dict) -> None:
-        image_path = Path(str(payload["path"]))
-        image_bytes = image_path.read_bytes()
+        if payload.get("url"):
+            image_bytes = _fetch_approved_image_url(payload)
+            name_source = _url_path(str(payload["url"]))
+        elif deployment_mode() == "server":
+            # Drafts refuse paths on a server; never read server files even
+            # if a path-based plan reached apply some other way.
+            raise ValueError(
+                "local file paths aren't available on a hosted server; "
+                "pass image_urls"
+            )
+        else:
+            name_source = Path(str(payload["path"]))
+            image_bytes = name_source.read_bytes()
         mime_type_name = _VALID_IMAGE_MIME_TYPES[str(payload["mime_type"])]
-        asset.name = str(payload.get("name") or _build_image_asset_name(image_path, image_bytes))
+        asset.name = str(payload.get("name") or _build_image_asset_name(name_source, image_bytes))
         asset.type_ = client.enums.AssetTypeEnum.IMAGE
         asset.image_asset.data = image_bytes
         asset.image_asset.mime_type = getattr(client.enums.MimeTypeEnum, mime_type_name)
