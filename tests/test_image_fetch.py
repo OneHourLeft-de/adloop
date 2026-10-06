@@ -331,6 +331,43 @@ class TestFetcher:
         # Stopped right after crossing the cap, not after downloading 50 MB.
         assert streams[0].served < MAX_IMAGE_BYTES + 256 * 1024
 
+    def test_a_trickling_server_cannot_outlast_the_deadline(self, net, monkeypatch):
+        """One byte per recv, each just under the socket timeout: only the
+        overall deadline stops it, so it must be checked per packet."""
+        clock = {"now": 1000.0}
+        monkeypatch.setattr(image_fetch.time, "monotonic", lambda: clock["now"])
+
+        class Trickle(io.RawIOBase):
+            def __init__(self, head: bytes, body: bytes):
+                self._head, self._body = head, body
+
+            def readable(self) -> bool:
+                return True
+
+            def readinto(self, buffer) -> int:
+                if self._head:
+                    n = min(len(buffer), len(self._head))
+                    buffer[:n] = self._head[:n]
+                    self._head = self._head[n:]
+                    return n
+                if not self._body:
+                    return 0
+                clock["now"] += 3.0  # each byte arrives three seconds later
+                buffer[:1] = self._body[:1]
+                self._body = self._body[1:]
+                return 1
+
+        body = png(600, 314, b"\0" * 2000)
+        head = http_response(body=body)[: -len(body)]
+        net.resolve("slow.example", [PUBLIC_IP])
+        net.serve(PUBLIC_IP, 80, lambda _request: Trickle(head, body))
+
+        with pytest.raises(ImageFetchError, match="took longer than"):
+            fetch_image_bytes("http://slow.example/banner.png")
+
+        # Stopped within one packet of the deadline, not after the whole body.
+        assert clock["now"] <= 1000.0 + image_fetch.TIMEOUT_SECONDS + 3.0
+
     def test_a_declared_oversized_body_is_refused_before_reading(self, net):
         net.resolve("big.example.com", [PUBLIC_IP])
         net.serve(

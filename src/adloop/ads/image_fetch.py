@@ -265,6 +265,7 @@ def _read_capped(response: http.client.HTTPResponse, url: str, deadline: float) 
                 f"accepts at most {MAX_IMAGE_BYTES // 1024} KB"
             )
 
+    read = getattr(response, "read1", None) or response.read
     chunks: list[bytes] = []
     total = 0
     while True:
@@ -272,7 +273,10 @@ def _read_capped(response: http.client.HTTPResponse, url: str, deadline: float) 
             raise ImageFetchError(
                 f"fetching {url} took longer than {TIMEOUT_SECONDS:.0f}s"
             )
-        chunk = response.read(_CHUNK_SIZE)
+        # read1 returns whatever has arrived instead of waiting for a full
+        # chunk, so a server trickling a byte at a time cannot outlast the
+        # deadline: the per-recv socket timeout alone would never fire.
+        chunk = read(_CHUNK_SIZE)
         if not chunk:
             break
         total += len(chunk)
