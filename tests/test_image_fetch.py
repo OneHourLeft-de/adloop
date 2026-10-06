@@ -252,6 +252,10 @@ class TestFetcher:
         wrapped = []
 
         class FakeContext:
+            # Python 3.11's HTTPSConnection reads these in __init__.
+            verify_mode = ssl.CERT_REQUIRED
+            check_hostname = True
+
             def wrap_socket(self, sock, server_hostname=None):
                 wrapped.append((sock.address, server_hostname))
                 return sock
