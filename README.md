@@ -228,7 +228,7 @@ All write operations follow a **draft → preview → confirm** workflow. Nothin
 | `draft_callouts` | Create campaign callout assets from 1-25 character text snippets. |
 | `draft_structured_snippets` | Create campaign structured snippet assets using official header values and 3-10 snippet values. |
 | `draft_image_assets` | Create campaign image assets from local files or public image URLs (PNG, JPEG, or GIF). |
-| `draft_keywords` | Propose keyword additions with match types. Proactively checks bidding strategy — blocks BROAD match on Manual CPC campaigns. |
+| `draft_keywords` | Propose keyword additions with match types. Proactively checks bidding strategy — flags BROAD match on campaigns without Smart Bidding as dangerous in the preview. |
 | `add_negative_keywords` | Propose negative keywords directly on a campaign |
 | `add_negative_locations` | Propose negative geo exclusions on a campaign — exclude cities/regions while keeping broader positive targets |
 | `draft_key_event` | Mark a GA4 event as a key event (conversion) — the fix for "fires but isn't tracked as a conversion" |
@@ -287,8 +287,8 @@ AdLoop manages real ad spend, so safety is not optional.
 - **Budget caps.** Configurable maximum daily budget — the server rejects anything above the cap.
 - **Audit log.** Every operation (including dry runs) is logged to `~/.adloop/audit.log`.
 - **New campaigns and ads are PAUSED.** Nothing goes live without manual enablement.
-- **Destructive ops require double confirmation.** Removing entities or large budget increases trigger extra warnings.
-- **Broad Match + Manual CPC blocked.** The #1 cause of wasted ad spend is automatically prevented — `draft_keywords` refuses to add BROAD match keywords to campaigns without Smart Bidding.
+- **Destructive ops are flagged for double confirmation.** Removing entities or large budget increases come back with extra warnings, and the AI is instructed to confirm twice.
+- **Broad Match without Smart Bidding caught.** The #1 cause of wasted ad spend: `draft_campaign` refuses BROAD keywords unless the campaign uses Smart Bidding, and `draft_keywords` / `draft_ad_group` mark them as dangerous in the preview, so the AI has to raise it before anything is applied.
 - **Pre-write validation.** Before any write, the AI checks bidding strategy, conversion tracking status, and quality scores. If the campaign is fundamentally broken, AdLoop warns you instead of making things worse.
 - **Structured error handling.** All tools return actionable error messages with hints instead of raw exceptions. Auth errors include specific re-authorization steps.
 - **API version pinning.** The Google Ads API version is pinned to prevent silent breaking changes from library updates. `health_check` warns when a newer version is available.
@@ -551,7 +551,7 @@ What's been shipped and what's next:
 - ~~PyPI package~~ ✓ — `pip install adloop`
 - ~~[AdLoop Cloud](https://getadloop.com)~~ ✓ — the hosted version: no Google Cloud project, no API access application, connect Google in two clicks (EU-hosted, GDPR-first)
 - ~~Headless server support~~ ✓ — manual URL copy-paste flow for servers without a browser
-- ~~Behavioral eval suites~~ ✓ — 28 prompt-and-expectation tests covering read, write, tracking, and planning workflows
+- ~~Behavioral eval suites~~ ✓ — prompt-and-expectation tests in `tests/evals/` covering read, write, tracking, and planning workflows
 - ~~Google Tag Manager integration~~ ✓ — read tools for tags, triggers, variables, workspaces, and version history, plus the `audit_event_coverage` three-way join across codebase events, GTM tags, and GA4 actual fires
 - **Community launch** — HN, Indie Hackers, r/cursor, Twitter
 - **Video walkthrough**

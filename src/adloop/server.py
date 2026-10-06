@@ -708,8 +708,9 @@ def analyze_page_speed(url: str, strategy: str = "mobile") -> dict:
 def list_merchant_accounts() -> dict:
     """List Google Merchant Center accounts the connected user can access.
 
-    Call first to discover merchant IDs for get_merchant_feed_health.
-    Distinguishes standalone accounts from aggregator (MCA) accounts.
+    Returns each account's numeric ID, name and whether it is a test
+    account. Call it to find the account_id for get_merchant_feed_health;
+    not needed when merchant.account_id is set in the config.
     """
     from adloop.merchant.read import list_merchant_accounts as _impl
 
