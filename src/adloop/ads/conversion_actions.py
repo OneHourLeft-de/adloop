@@ -688,20 +688,36 @@ def _consent_from_param(consent: dict | None) -> dict | None:
     """Validate + normalize the ``consent`` tool parameter.
 
     Accepts ``{"ad_user_data": "GRANTED"|"DENIED"|"UNSPECIFIED",
-    "ad_personalization": ...}``. Missing keys default to UNSPECIFIED.
-    Returns a plain dict stored in the plan (JSON-safe, non-PII), or None
-    if no consent was supplied at all.
+    "ad_personalization": ...}``. ``UNKNOWN`` is a legal enum value too.
+    Missing keys default to UNSPECIFIED. Returns a plain dict stored in the
+    plan (JSON-safe, non-PII), or None if no consent was supplied at all.
+
+    An unknown key is an error rather than a silent no-op: ``adPersonalization``
+    (camelCase) would otherwise leave the field at UNSPECIFIED, which for EEA
+    traffic is exactly the wrong default to fall into unnoticed.
     """
     if not consent:
         return None
+    if not isinstance(consent, dict):
+        raise ValueError(
+            "consent must be an object with 'ad_user_data' and/or "
+            "'ad_personalization'"
+        )
+    known = ("ad_user_data", "ad_personalization")
+    unknown = sorted(str(key) for key in set(consent) - set(known))
+    if unknown:
+        raise ValueError(
+            f"consent has unknown key(s): {', '.join(unknown)}. Use only "
+            "ad_user_data and ad_personalization."
+        )
     valid = {"UNSPECIFIED", "UNKNOWN", "GRANTED", "DENIED"}
     out: dict[str, str] = {}
-    for key in ("ad_user_data", "ad_personalization"):
+    for key in known:
         raw = str(consent.get(key, "UNSPECIFIED") or "UNSPECIFIED").upper()
         if raw not in valid:
             raise ValueError(
                 f"consent.{key}='{raw}' is invalid. Use one of: "
-                "GRANTED, DENIED, UNSPECIFIED."
+                "GRANTED, DENIED, UNSPECIFIED, UNKNOWN."
             )
         out[key] = raw
     return out

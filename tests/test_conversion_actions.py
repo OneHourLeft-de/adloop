@@ -762,6 +762,63 @@ class TestConsentParam:
         with pytest.raises(ValueError):
             conversion_actions._consent_from_param({"ad_user_data": "YES"})
 
+    def test_an_unknown_key_raises_instead_of_being_ignored(self):
+        """`adPersonalization` would leave the field at UNSPECIFIED unnoticed."""
+        with pytest.raises(ValueError, match="adPersonalization"):
+            conversion_actions._consent_from_param({"adPersonalization": "GRANTED"})
+
+    def test_the_error_text_lists_every_accepted_value(self):
+        with pytest.raises(ValueError) as info:
+            conversion_actions._consent_from_param({"ad_user_data": "YES"})
+
+        text = str(info.value)
+        for value in ("GRANTED", "DENIED", "UNSPECIFIED", "UNKNOWN"):
+            assert value in text
+
+    def test_unknown_is_a_legal_value(self):
+        # The ConsentStatus enum has UNKNOWN next to UNSPECIFIED.
+        normalized = conversion_actions._consent_from_param(
+            {"ad_user_data": "UNKNOWN"}
+        )
+        assert normalized["ad_user_data"] == "UNKNOWN"
+
+    def test_a_consent_that_is_not_an_object_is_refused(self):
+        with pytest.raises(ValueError, match="consent must be an object"):
+            conversion_actions._consent_from_param("GRANTED")
+
+    def test_both_drafts_refuse_a_misspelled_key(
+        self, config, tmp_path, monkeypatch
+    ):
+        cases = (
+            (
+                conversion_actions.draft_upload_call_conversions,
+                "UPLOAD_CALLS",
+                _CALL_HEADER,
+                "+14155550142,2026-03-01T12:00:00Z,My Action,"
+                "2026-03-01T13:00:00Z,10,USD\n",
+            ),
+            (
+                conversion_actions.draft_upload_enhanced_conversions_for_leads,
+                "UPLOAD_CLICKS",
+                _EC_HEADER,
+                "user@example.com,+14155550142,Anna,Lena,My Action,"
+                "2026-03-01T12:00:00Z,10,USD\n",
+            ),
+        )
+        for draft, type_name, header, row in cases:
+            _patch_drafts_client(monkeypatch, type_name)
+            path = tmp_path / f"{type_name}.csv"
+            path.write_text(header.rstrip("\n") + "\n" + row)
+
+            result = draft(
+                config,
+                customer_id="1234567890",
+                csv_path=str(path),
+                consent={"adPersonalization": "GRANTED"},
+            )
+
+            assert "adPersonalization" in result["error"], type_name
+
 
 # ---------------------------------------------------------------------------
 # Fakes for the upload paths
