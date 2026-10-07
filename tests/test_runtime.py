@@ -204,12 +204,13 @@ class TestServerModeGates:
         with pytest.raises(RuntimeError, match="server mode"):
             get_ads_credentials(AdLoopConfig())
 
-    def test_draft_image_assets_gated_in_server_mode(self):
+    def test_draft_image_assets_refuses_local_paths_in_server_mode(self):
         from adloop.ads.write import draft_image_assets
 
         runtime.set_deployment_mode("server")
         result = draft_image_assets(MagicMock(), campaign_id="1", image_paths=["x.png"])
-        assert "not available on the hosted server" in result["error"]
+        assert "local file paths aren't available on a hosted server" in result["error"]
+        assert "pass image_urls" in result["error"]
 
     def test_local_gtm_credentials_refuse_server_mode(self):
         from adloop.auth import get_gtm_credentials

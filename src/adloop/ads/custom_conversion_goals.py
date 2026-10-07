@@ -537,7 +537,6 @@ def draft_clear_custom_conversion_goal(
 
     Call ``confirm_and_apply`` with the returned plan_id to execute.
     """
-    from adloop.ads.client import normalize_customer_id
     from adloop.safety.guards import SafetyViolation, check_blocked_operation
     from adloop.safety.preview import ChangePlan, store_plan
 
@@ -553,7 +552,6 @@ def draft_clear_custom_conversion_goal(
             "details": ["campaign_id must be a numeric ID"],
         }
 
-    cid = normalize_customer_id(customer_id or config.ads.customer_id)
     state = _custom_goal_state(config, customer_id, campaign_id=campaign_id)
     campaign = find_campaign(state, campaign_id)
     if campaign is None:

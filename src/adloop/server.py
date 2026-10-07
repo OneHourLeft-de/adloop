@@ -708,8 +708,9 @@ def analyze_page_speed(url: str, strategy: str = "mobile") -> dict:
 def list_merchant_accounts() -> dict:
     """List Google Merchant Center accounts the connected user can access.
 
-    Call first to discover merchant IDs for get_merchant_feed_health.
-    Distinguishes standalone accounts from aggregator (MCA) accounts.
+    Returns each account's numeric ID, name and whether it is a test
+    account. Call it to find the account_id for get_merchant_feed_health;
+    not needed when merchant.account_id is set in the config.
     """
     from adloop.merchant.read import list_merchant_accounts as _impl
 
@@ -2458,10 +2459,25 @@ def draft_structured_snippets(
 @_safe
 def draft_image_assets(
     campaign_id: str,
-    image_paths: _StrList,
+    image_paths: _StrList = [],  # noqa: B006 — mutable default required for MCP JSON schema
+    image_urls: _StrList = [],  # noqa: B006
     customer_id: str = "",
 ) -> dict:
-    """Draft campaign image assets from local PNG, JPEG, or GIF files."""
+    """Draft campaign image assets from local files or public image URLs — returns a PREVIEW.
+
+    Pass at least one image in total across image_paths and image_urls.
+    Images must be PNG, JPEG or GIF and at most 5120 KB (Google's limit).
+    URL images are downloaded now and checked; applying re-downloads them
+    and refuses if the image changed since the preview.
+
+    Args:
+        campaign_id: Numeric ID of the campaign to attach the images to.
+        image_paths: Local PNG/JPEG/GIF file paths on the machine running
+            AdLoop. Not available on a hosted server — use image_urls there.
+        image_urls: Public http(s) URLs of PNG/JPEG/GIF images. Links to
+            private, local or internal addresses are refused.
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
     from adloop.ads.write import draft_image_assets as _impl
 
     return _impl(
@@ -2469,6 +2485,7 @@ def draft_image_assets(
         customer_id=customer_id or current_config().ads.customer_id,
         campaign_id=campaign_id,
         image_paths=image_paths,
+        image_urls=image_urls,
     )
 
 

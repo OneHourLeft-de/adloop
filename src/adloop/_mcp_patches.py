@@ -71,7 +71,13 @@ def _patch_request_responder_cancel_race() -> None:
     """
     try:
         from mcp.shared import session as _session_module
-    except Exception as exc:  # pragma: no cover — mcp is a hard dep
+    except ModuleNotFoundError:
+        # mcp 2 rewrote the session layer: the racing RequestResponder is gone
+        # and the new dispatcher has a single response writer, so there is
+        # nothing to patch. Not an error.
+        _log("pysdk-2416 not applicable: mcp>=2 has no RequestResponder race")
+        return
+    except Exception as exc:  # pragma: no cover — unexpected import failure
         _log(f"skip pysdk-2416: cannot import mcp.shared.session ({exc})")
         return
 
