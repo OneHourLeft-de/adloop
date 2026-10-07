@@ -923,7 +923,7 @@ _CALL_HEADER = (
 
 class TestParseCallConversionCsv:
     def test_missing_file(self, tmp_path):
-        rows, errors, _skipped = conversion_actions._parse_call_conversion_csv(
+        rows, errors, _advisories, _skipped = conversion_actions._parse_call_conversion_csv(
             str(tmp_path / "nope.csv")
         )
         assert rows == []
@@ -937,7 +937,7 @@ class TestParseCallConversionCsv:
             + "+14155550142,2026-03-01T12:00:00Z,My Action,"
             "2026-03-01T13:00:00Z,250.00,usd\n"
         )
-        rows, errors, _skipped = conversion_actions._parse_call_conversion_csv(str(p))
+        rows, errors, _advisories, _skipped = conversion_actions._parse_call_conversion_csv(str(p))
         assert errors == []
         assert len(rows) == 1
         assert rows[0]["caller_id"] == "+14155550142"
@@ -951,7 +951,7 @@ class TestParseCallConversionCsv:
             "Conversion Value,Conversion Currency\n"
             "+14155550142,X,2026-03-01T13:00:00Z,10,USD\n"
         )
-        rows, errors, _skipped = conversion_actions._parse_call_conversion_csv(str(p))
+        rows, errors, _advisories, _skipped = conversion_actions._parse_call_conversion_csv(str(p))
         assert rows == []
         assert any("Call Start Time" in e for e in errors)
 
@@ -1252,7 +1252,7 @@ class TestParseEcForLeadsCsvHashesPii:
             "User@Example.com,+1 415 555 0142,Test,User,My Action,"
             "2026-03-01T12:00:00Z,250.00,USD\n",
         )
-        rows, errors, _skipped = conversion_actions._parse_ec_for_leads_csv(path)
+        rows, errors, _advisories, _skipped = conversion_actions._parse_ec_for_leads_csv(path)
         assert errors == []
         r = rows[0]
         assert r["email_sha256"] == _EMAIL_HASH
@@ -1269,7 +1269,7 @@ class TestParseEcForLeadsCsvHashesPii:
             _EC_HEADER + "\n"
             ",+14155550142,,,My Action,2026-03-01T12:00:00Z,200.00,USD\n",
         )
-        rows, _errors, _skipped = conversion_actions._parse_ec_for_leads_csv(path)
+        rows, _errors, _advisories, _skipped = conversion_actions._parse_ec_for_leads_csv(path)
         assert rows[0]["email_sha256"] == ""
         assert rows[0]["first_name_sha256"] == ""
         assert rows[0]["phone_sha256"] == _PHONE_HASH
@@ -1281,7 +1281,7 @@ class TestParseEcForLeadsCsvHashesPii:
             "user@example.com,+14155550142,Test,User,My Action,"
             "2026-03-01T12:00:00Z,250.00,USD,ORD-001\n",
         )
-        rows, _errors, _skipped = conversion_actions._parse_ec_for_leads_csv(path)
+        rows, _errors, _advisories, _skipped = conversion_actions._parse_ec_for_leads_csv(path)
         assert rows[0]["order_id"] == "ORD-001"
 
     def test_order_id_defaults_empty_when_absent(self, tmp_path):
@@ -1291,7 +1291,7 @@ class TestParseEcForLeadsCsvHashesPii:
             "user@example.com,+14155550142,Test,User,My Action,"
             "2026-03-01T12:00:00Z,250.00,USD\n",
         )
-        rows, _errors, _skipped = conversion_actions._parse_ec_for_leads_csv(path)
+        rows, _errors, _advisories, _skipped = conversion_actions._parse_ec_for_leads_csv(path)
         assert rows[0]["order_id"] == ""
 
     def test_missing_required_column(self, tmp_path):
@@ -1301,7 +1301,7 @@ class TestParseEcForLeadsCsvHashesPii:
             "Conversion Value,Conversion Currency\n"
             "user@example.com,+14155550142,X,2026-03-01T12:00:00Z,10,USD\n",
         )
-        rows, errors, _skipped = conversion_actions._parse_ec_for_leads_csv(path)
+        rows, errors, _advisories, _skipped = conversion_actions._parse_ec_for_leads_csv(path)
         assert rows == []
         assert any("First Name" in e or "Last Name" in e for e in errors)
 
@@ -1847,7 +1847,7 @@ class TestCsvInputHardening:
             + "user@example.com,+14155550142,Test,User,My Action,"
               "2026-03-01T12:00:00Z,200.00,USD\n"
         )
-        rows, errors, _skipped = conversion_actions._parse_ec_for_leads_csv(
+        rows, errors, _advisories, _skipped = conversion_actions._parse_ec_for_leads_csv(
             self._write(tmp_path, body)
         )
         assert errors == []
@@ -1955,8 +1955,10 @@ class TestWarningsNeverEchoCells:
             config, customer_id="1234567890", csv_path=path
         )
 
-        text = " ".join(result["details"])
-        assert "Row 2" in text
+        # The row is left out with its line, and the cell is never echoed.
+        assert "zero conversion rows" in result["error"]
+        assert result["skipped_rows"][0]["row"] == 2
+        text = result["skipped_rows"][0]["reason"]
         assert "Conversion Currency" in text
         assert "max.schmidt" not in text.lower()
 
@@ -2248,6 +2250,33 @@ class TestSkippedAndUnmatchableRows:
         skipped = plan.changes["skipped_rows"][0]
         assert skipped["row"] == 2
         assert "not an address" in skipped["reason"]
+
+    def test_a_row_that_fails_to_parse_counts_as_skipped_not_as_a_warning(
+        self, config, tmp_path, monkeypatch
+    ):
+        """`skipped_count` has to equal the rows that are really not uploaded."""
+        _patch_drafts_client(monkeypatch, "UPLOAD_CALLS")
+        path = tmp_path / "phone.csv"
+        path.write_text(
+            _CALL_HEADER
+            + "+14155550142,2026-03-01T12:00:00Z,My Action,"
+              "2026-03-01T13:00:00Z,10,USD\n"
+            + "+14155550143,2026-03-01T12:00:00Z,My Action,"
+              "not-a-time,10,USD\n"
+        )
+
+        result = conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+        plan = _stored_plan(result)
+
+        assert plan.changes["row_count"] == 1
+        assert plan.changes["skipped_count"] == 1
+        assert plan.changes["skipped_rows"][0]["row"] == 3
+        assert "not a recognized timestamp" in plan.changes["skipped_rows"][0]["reason"]
+        # Nothing advisory happened, so there is nothing in the warnings.
+        assert plan.changes["parse_warnings"] == []
+        assert "1 row(s) from the CSV are not uploaded" in plan.changes["skipped_note"]
 
     def test_an_unusable_email_is_dropped_and_warned_about(
         self, config, tmp_path, monkeypatch
@@ -2898,7 +2927,7 @@ class TestRecordStartLine:
             + "+14155550142,2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,10,USD\n"
         )
 
-        rows, _errors, _skipped = conversion_actions._parse_call_conversion_csv(
+        rows, _errors, _advisories, _skipped = conversion_actions._parse_call_conversion_csv(
             str(path)
         )
         assert rows[0]["source_line"] == 2      # header is line 1
@@ -3182,9 +3211,10 @@ class TestTimestampsAndTimeZones:
 
         # A row whose time cannot be resolved is a parsing problem, so it is
         # reported as one — with the physical line.
-        assert "CSV parse failed" in result["error"]
-        details = " ".join(result["details"])
-        assert "Row 2" in details and "time zone" in details
+        assert "zero conversion rows" in result["error"]
+        skipped = result["skipped_rows"]
+        assert [entry["row"] for entry in skipped] == [2]
+        assert "time zone" in skipped[0]["reason"]
 
     def test_a_us_date_format_is_recognized(self, config, tmp_path, monkeypatch):
         result = self._call_draft(
@@ -3204,8 +3234,8 @@ class TestTimestampsAndTimeZones:
             _CALL_HEADER + self._row("2026-03-01T13:00:00Z", "2026-03-01T12:00:00Z"),
         )
 
-        assert "CSV parse failed" in result["error"]
-        assert "before Call Start Time" in " ".join(result["details"])
+        assert "zero conversion rows" in result["error"]
+        assert "before Call Start Time" in result["skipped_rows"][0]["reason"]
 
     def test_a_conversion_in_the_future_is_refused(
         self, config, tmp_path, monkeypatch
@@ -3215,7 +3245,7 @@ class TestTimestampsAndTimeZones:
             _CALL_HEADER + self._row("2099-03-01T12:00:00Z", "2099-03-01T13:00:00Z"),
         )
 
-        assert "future" in " ".join(result["details"])
+        assert "future" in result["skipped_rows"][0]["reason"]
 
 
 class TestValueAndCurrencyAreOptional:
@@ -3284,8 +3314,11 @@ class TestValueAndCurrencyAreOptional:
                 "+14155550142,2026-03-01T12:00:00Z,My Action,"
                 f"2026-03-01T13:00:00Z,{bad},USD",
             )
-            assert "CSV parse failed" in result["error"], bad
-            assert "finite number" in " ".join(result["details"]), bad
+            # A row that cannot be parsed is left out, not silently uploaded.
+            assert "zero conversion rows" in result["error"], bad
+            assert "finite number" in " ".join(
+                entry["reason"] for entry in result["skipped_rows"]
+            ), bad
 
     def test_the_currency_must_be_a_three_letter_code(
         self, config, tmp_path, monkeypatch
@@ -3302,7 +3335,9 @@ class TestValueAndCurrencyAreOptional:
             "+14155550142,2026-03-01T12:00:00Z,My Action,"
             "2026-03-01T13:00:00Z,10,US",
         )
-        assert "3-letter ISO code" in " ".join(bad["details"])
+        assert "3-letter ISO code" in " ".join(
+            entry["reason"] for entry in bad["skipped_rows"]
+        )
 
 
 class _UnreadableResponse:

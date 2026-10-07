@@ -1025,13 +1025,19 @@ def _pad_to_header(raw: list[str], columns: int) -> list[str]:
 
 def _parse_call_conversion_csv(
     csv_path: str, default_region: str = ""
-) -> tuple[list[dict], list[str], list[dict]]:
+) -> tuple[list[dict], list[str], list[str], list[dict]]:
     """Read the call-conversions CSV (local file) and normalize each row.
 
-    Returns (rows, errors, skipped). Rows are dicts keyed by canonical column
-    name; comment lines are skipped, and the optional ``Parameters:TimeZone=...``
-    row is read rather than skipped — it resolves timestamps that carry no
-    offset. ``skipped`` names the records that are too short to be a row at all.
+    Returns ``(rows, errors, advisories, skipped)``. Rows are dicts keyed by
+    canonical column name; comment lines are skipped, and the optional
+    ``Parameters:TimeZone=...`` row is read rather than skipped — it resolves
+    timestamps that carry no offset.
+
+    ``errors`` are file-level problems that stop the draft. ``advisories``
+    describe rows that still upload (a bare date, a country code that dropped
+    only the address fragment). ``skipped`` lists every row that will *not* be
+    uploaded, with its ``source_line`` — that is what makes ``skipped_count``
+    equal the number of CSV rows left out.
 
     The ``caller_id`` (E.164 phone) is retained RAW — Google requires it for
     call-to-click matching and it cannot be hashed. The draft stores it in
@@ -1039,16 +1045,17 @@ def _parse_call_conversion_csv(
     """
     records, errors, timezone = _read_upload_csv(csv_path)
     if errors:
-        return [], errors, []
+        return [], errors, [], []
 
     _, header = records[0]
     col, errors = _column_map(header, _EXPECTED_CALL_HEADERS)
     if errors:
-        return [], errors, []
+        return [], errors, [], []
 
     now = datetime.now(_tz.utc)
     out: list[dict] = []
     skipped: list[dict] = []
+    advisories: list[str] = []
     for source_line, raw in records[1:]:
         if _short_row(raw, col):
             skipped.append({
@@ -1064,34 +1071,42 @@ def _parse_call_conversion_csv(
             raw[col["Conversion Value"]], raw[col["Conversion Currency"]]
         )
         if problem:
-            errors.append(f"Row {source_line}: {problem}")
+            skipped.append({"row": source_line, "reason": problem})
             continue
 
         call_start, problem = _parse_timestamp(raw[col["Call Start Time"]], timezone)
         if problem:
-            errors.append(f"Row {source_line}: Call Start Time {problem}")
+            skipped.append({
+                "row": source_line, "reason": f"Call Start Time {problem}"
+            })
             continue
         converted, problem = _parse_timestamp(raw[col["Conversion Time"]], timezone)
         if problem:
-            errors.append(f"Row {source_line}: Conversion Time {problem}")
+            skipped.append({
+                "row": source_line, "reason": f"Conversion Time {problem}"
+            })
             continue
 
         start_dt = datetime.fromisoformat(call_start)
         converted_dt = datetime.fromisoformat(converted)
         if converted_dt < start_dt:
-            errors.append(
-                f"Row {source_line}: Conversion Time is before Call Start Time"
-            )
+            skipped.append({
+                "row": source_line,
+                "reason": "Conversion Time is before Call Start Time",
+            })
             continue
         if converted_dt > now:
-            errors.append(f"Row {source_line}: Conversion Time is in the future")
+            skipped.append({
+                "row": source_line,
+                "reason": "Conversion Time is in the future",
+            })
             continue
 
         # A bare date parses to midnight, which is rarely what the export
         # meant: say so instead of quietly shifting the conversion by hours.
         for label in ("Call Start Time", "Conversion Time"):
             if not _has_time_component(raw[col[label]]):
-                errors.append(
+                advisories.append(
                     f"Row {source_line}: {label} carries no time — midnight "
                     "was assumed"
                 )
@@ -1107,7 +1122,7 @@ def _parse_call_conversion_csv(
             "conversion_value": value,
             "currency_code": currency,
         })
-    return out, errors, skipped
+    return out, errors, advisories, skipped
 
 
 def _redact_caller_id(caller_id: str) -> str:
@@ -1194,25 +1209,24 @@ def draft_upload_call_conversions(
             )
         }
 
-    rows, parse_errors, short_rows = _parse_call_conversion_csv(
+    rows, parse_errors, parse_advisories, dropped_rows = _parse_call_conversion_csv(
         csv_path, default_region
     )
-    if parse_errors and not rows:
+    if parse_errors:
         return {
             "error": "CSV parse failed",
             "details": parse_errors,
-            **({"skipped_rows": short_rows} if short_rows else {}),
         }
     if not rows:
         return {
             "error": "CSV contained zero conversion rows",
-            **({"skipped_rows": short_rows} if short_rows else {}),
+            **({"skipped_rows": dropped_rows} if dropped_rows else {}),
         }
 
     # A call upload without a usable E.164 caller id cannot match anything —
     # Google fails such a row. Report it here instead of uploading a no-op.
     usable: list[dict] = []
-    skipped: list[dict] = list(short_rows)
+    skipped: list[dict] = list(dropped_rows)
     for row in rows:
         caller = (row.get("caller_id") or "").strip()
         if caller.startswith("+"):
@@ -1298,11 +1312,16 @@ def draft_upload_call_conversions(
             "rows_without_currency": rows_without_currency,
             "skipped_count": len(skipped),
             "skipped_rows": skipped,
+            # Say it in prose too: the count is easy to miss in a JSON blob.
+            **({"skipped_note": (
+                f"{len(skipped)} row(s) from the CSV are not uploaded — see "
+                "skipped_rows for the line and the reason."
+            )} if skipped else {}),
             "distinct_conversion_actions": distinct_actions,
             # Resolved at draft time; apply reads them instead of querying again.
             "conversion_actions": action_resources,
             "consent": consent_norm,
-            "parse_warnings": parse_errors,
+            "parse_warnings": parse_advisories,
             # Display sample uses REDACTED caller ids only.
             "sample_rows": [
                 {
@@ -1852,16 +1871,18 @@ _OPTIONAL_EC_HEADERS = [
 
 def _parse_ec_for_leads_csv(
     csv_path: str, default_region: str = ""
-) -> tuple[list[dict], list[str], list[dict]]:
+) -> tuple[list[dict], list[str], list[str], list[dict]]:
     """Parse the EC-for-Leads CSV (local file) and hash PII at parse time.
 
     Required columns: Email, Phone Number, First Name, Last Name,
     Conversion Name, Conversion Time, Conversion Value, Conversion Currency.
     Optional: Order ID (Google's dedup key — strongly recommended so
     re-uploads of the same source row don't double-count), Country Code,
-    Postal Code. Returns ``(rows, errors, skipped)``; a record that ends before
-    the last required column is skipped with its ``source_line`` instead of
-    aborting the draft.
+    Postal Code. Returns ``(rows, errors, advisories, skipped)``: ``errors``
+    are file-level problems, ``advisories`` describe rows that still upload, and
+    ``skipped`` lists every row that will not be uploaded with its
+    ``source_line``. A record that ends before the last required column is
+    skipped instead of aborting the draft.
 
     The Email / Phone Number / First Name / Last Name columns hold RAW PII.
     Each is normalized (email→trim+lowercase, phone→E.164, names→trim+
@@ -1871,17 +1892,18 @@ def _parse_ec_for_leads_csv(
     """
     records, errors, timezone = _read_upload_csv(csv_path)
     if errors:
-        return [], errors, []
+        return [], errors, [], []
 
     _, raw_header = records[0]
     col, errors = _column_map(raw_header, _EXPECTED_EC_HEADERS)
     if errors:
-        return [], errors, []
+        return [], errors, [], []
     header = [cell.strip() for cell in raw_header]
     optional_col = {n: header.index(n) for n in _OPTIONAL_EC_HEADERS if n in header}
 
     out: list[dict] = []
     skipped: list[dict] = []
+    advisories: list[str] = []
     for source_line, raw in records[1:]:
         if _short_row(raw, col):
             skipped.append({
@@ -1900,7 +1922,7 @@ def _parse_ec_for_leads_csv(
             raw[col["Conversion Value"]], raw[col["Conversion Currency"]]
         )
         if problem:
-            errors.append(f"Row {source_line}: {problem}")
+            skipped.append({"row": source_line, "reason": problem})
             continue
         order_id = ""
         if "Order ID" in optional_col:
@@ -1924,15 +1946,20 @@ def _parse_ec_for_leads_csv(
             raw[col["Conversion Time"]], timezone
         )
         if problem:
-            errors.append(f"Row {source_line}: Conversion Time {problem}")
+            skipped.append({
+                "row": source_line, "reason": f"Conversion Time {problem}"
+            })
             continue
         if datetime.fromisoformat(converted_time) > datetime.now(_tz.utc):
-            errors.append(f"Row {source_line}: Conversion Time is in the future")
+            skipped.append({
+                "row": source_line,
+                "reason": "Conversion Time is in the future",
+            })
             continue
         if not _has_time_component(raw[col["Conversion Time"]]):
             # A bare date parses to midnight; say so instead of shifting the
             # conversion by hours without a word.
-            errors.append(
+            advisories.append(
                 f"Row {source_line}: Conversion Time carries no time — "
                 "midnight was assumed"
             )
@@ -1945,7 +1972,7 @@ def _parse_ec_for_leads_csv(
             # what was dropped. Only a row left without any identifier is
             # skipped, and that happens in the draft where it is reported as
             # skipped_rows rather than as a parse warning.
-            errors.append(
+            advisories.append(
                 f"Row {source_line}: Country Code must be a two-letter ISO "
                 "code — the address was dropped for this row"
             )
@@ -1968,7 +1995,7 @@ def _parse_ec_for_leads_csv(
             "currency_code": currency,
             "order_id": order_id,
         })
-    return out, errors, skipped
+    return out, errors, advisories, skipped
 
 
 def _has_complete_address(row: dict) -> bool:
@@ -2095,19 +2122,18 @@ def draft_upload_enhanced_conversions_for_leads(
             )
         }
 
-    rows, parse_errors, short_rows = _parse_ec_for_leads_csv(
+    rows, parse_errors, parse_advisories, dropped_rows = _parse_ec_for_leads_csv(
         csv_path, default_region
     )
-    if parse_errors and not rows:
+    if parse_errors:
         return {
             "error": "CSV parse failed",
             "details": parse_errors,
-            **({"skipped_rows": short_rows} if short_rows else {}),
         }
     if not rows:
         return {
             "error": "CSV contained zero conversion rows",
-            **({"skipped_rows": short_rows} if short_rows else {}),
+            **({"skipped_rows": dropped_rows} if dropped_rows else {}),
         }
 
     # A row that cannot match would be uploaded to no effect and counted as a
@@ -2116,7 +2142,7 @@ def draft_upload_enhanced_conversions_for_leads(
     # names and plain address — a postcode alone identifies nobody. So a row is
     # usable with an email, an E.164 phone, or that complete address.
     usable: list[dict] = []
-    skipped: list[dict] = list(short_rows)
+    skipped: list[dict] = list(dropped_rows)
     for row in rows:
         has_names = bool(row["first_name_sha256"] and row["last_name_sha256"])
         has_address = bool(
@@ -2270,11 +2296,16 @@ def draft_upload_enhanced_conversions_for_leads(
             "rows_with_address": with_address,
             "skipped_count": len(skipped),
             "skipped_rows": skipped,
+            # Say it in prose too: the count is easy to miss in a JSON blob.
+            **({"skipped_note": (
+                f"{len(skipped)} row(s) from the CSV are not uploaded — see "
+                "skipped_rows for the line and the reason."
+            )} if skipped else {}),
             "distinct_conversion_actions": distinct_actions,
             # Resolved at draft time; apply reads them instead of querying again.
             "conversion_actions": action_resources,
             "consent": consent_norm,
-            "parse_warnings": parse_errors,
+            "parse_warnings": parse_advisories,
             "dedup_warnings": dedup_warnings,
             "match_warnings": _match_warnings(
                 names_without_address,
