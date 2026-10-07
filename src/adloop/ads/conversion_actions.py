@@ -599,15 +599,23 @@ def _sha256_hex(value: str) -> str:
 def _normalize_email(email: str) -> str:
     """Normalize an email the way Enhanced Conversions expect it hashed.
 
-    Google's rules (Enhanced conversions → upload identifiers):
+    Google's rules, "Normalize and hash user-provided data" —
+    https://developers.google.com/google-ads/api/docs/conversions/upload-identifiers#prepare-data
+    (read 2026-10-07):
 
     * lowercase and remove whitespace everywhere;
-    * for ``gmail.com`` / ``googlemail.com`` only: remove periods from the
-       username, then drop the ``+…`` suffix — skipping this produces a hash
-      Google does not expect for those domains, which silently loses matches.
-      Both steps are in Google's stated normalization rules; only some of the
-      per-language samples on that page leave the plus suffix alone, so this
-      follows the rule, not the samples;
+    * for ``gmail.com`` / ``googlemail.com`` only, two steps the page lists
+      under "Apply domain-specific normalization": "Remove periods ( . ): From
+      the username portion … remove all period characters" and "Remove plus
+      suffixes ( + ): … remove the first plus sign ( + ) and all subsequent
+      characters up to the @ symbol". Its worked example is
+      ``Jane.Doe+Shopping@googlemail.com`` → ``janedoe@googlemail.com``. The
+      note above the code samples repeats it: for enhanced conversions the
+      domain-specific normalization means "removing periods **and plus
+      suffixes**", otherwise "different hash values than Google expects …
+      leading to missed matches". Only some of the per-language samples on that
+      page (C#, PHP, Ruby, Perl) stop at the periods, so this follows the
+      stated rule, not those samples;
     * every other domain keeps dots and plus tags.
 
     A value that is not an address at all (no ``@``, or an empty side) hashes
