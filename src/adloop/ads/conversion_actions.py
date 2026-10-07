@@ -751,7 +751,10 @@ def _parse_amount(value_cell: str, currency_cell: str) -> tuple[object, str, str
 
     currency = (currency_cell or "").strip().upper()
     if currency and not re.fullmatch(r"[A-Z]{3}", currency):
-        return None, "", f"Conversion Currency must be a 3-letter ISO code, got {currency!r}"
+        # The cell is never echoed: a shifted column can put an address or a
+        # name there, and this text travels into changes, the preview and the
+        # audit log. The caller names the row and the column instead.
+        return None, "", "Conversion Currency must be a 3-letter ISO code"
     return value, currency, ""
 
 
@@ -965,14 +968,34 @@ def _column_map(
     return {name: columns.index(name) for name in expected}, []
 
 
+def _short_row(raw: list[str], col: dict[str, int]) -> bool:
+    """True when a record ends before the last required column.
+
+    Google's exports occasionally break a line early (a stray newline, a hand
+    edit). Indexing such a cell raises ``IndexError`` and aborts the whole
+    draft with a message that names no row — the row is skipped with its
+    ``source_line`` instead. A record that only lacks *optional* trailing
+    columns is fine: it still carries everything the upload needs.
+    """
+    return len(raw) <= max(col.values())
+
+
+def _pad_to_header(raw: list[str], columns: int) -> list[str]:
+    """Fill missing trailing cells with "" so every header index exists."""
+    if len(raw) >= columns:
+        return raw
+    return raw + [""] * (columns - len(raw))
+
+
 def _parse_call_conversion_csv(
     csv_path: str, default_region: str = ""
-) -> tuple[list[dict], list[str]]:
+) -> tuple[list[dict], list[str], list[dict]]:
     """Read the call-conversions CSV (local file) and normalize each row.
 
-    Returns (rows, errors). Rows are dicts keyed by canonical column name;
-    comment lines are skipped, and the optional ``Parameters:TimeZone=...`` row
-    is read rather than skipped — it resolves timestamps that carry no offset.
+    Returns (rows, errors, skipped). Rows are dicts keyed by canonical column
+    name; comment lines are skipped, and the optional ``Parameters:TimeZone=...``
+    row is read rather than skipped — it resolves timestamps that carry no
+    offset. ``skipped`` names the records that are too short to be a row at all.
 
     The ``caller_id`` (E.164 phone) is retained RAW — Google requires it for
     call-to-click matching and it cannot be hashed. The draft stores it in
@@ -980,16 +1003,27 @@ def _parse_call_conversion_csv(
     """
     records, errors, timezone = _read_upload_csv(csv_path)
     if errors:
-        return [], errors
+        return [], errors, []
 
     _, header = records[0]
     col, errors = _column_map(header, _EXPECTED_CALL_HEADERS)
     if errors:
-        return [], errors
+        return [], errors, []
 
     now = datetime.now(_tz.utc)
     out: list[dict] = []
+    skipped: list[dict] = []
     for source_line, raw in records[1:]:
+        if _short_row(raw, col):
+            skipped.append({
+                "row": source_line,
+                "reason": (
+                    f"short row: {len(raw)} of {len(header)} columns — it ends "
+                    "before the last required column"
+                ),
+            })
+            continue
+        raw = _pad_to_header(raw, len(header))
         value, currency, problem = _parse_amount(
             raw[col["Conversion Value"]], raw[col["Conversion Currency"]]
         )
@@ -1028,7 +1062,7 @@ def _parse_call_conversion_csv(
             "conversion_value": value,
             "currency_code": currency,
         })
-    return out, errors
+    return out, errors, skipped
 
 
 def _redact_caller_id(caller_id: str) -> str:
@@ -1114,16 +1148,25 @@ def draft_upload_call_conversions(
             )
         }
 
-    rows, parse_errors = _parse_call_conversion_csv(csv_path, default_region)
+    rows, parse_errors, short_rows = _parse_call_conversion_csv(
+        csv_path, default_region
+    )
     if parse_errors and not rows:
-        return {"error": "CSV parse failed", "details": parse_errors}
+        return {
+            "error": "CSV parse failed",
+            "details": parse_errors,
+            **({"skipped_rows": short_rows} if short_rows else {}),
+        }
     if not rows:
-        return {"error": "CSV contained zero conversion rows"}
+        return {
+            "error": "CSV contained zero conversion rows",
+            **({"skipped_rows": short_rows} if short_rows else {}),
+        }
 
     # A call upload without a usable E.164 caller id cannot match anything —
     # Google fails such a row. Report it here instead of uploading a no-op.
     usable: list[dict] = []
-    skipped: list[dict] = []
+    skipped: list[dict] = list(short_rows)
     for row in rows:
         caller = (row.get("caller_id") or "").strip()
         if caller.startswith("+"):
@@ -1718,13 +1761,16 @@ _OPTIONAL_EC_HEADERS = [
 
 def _parse_ec_for_leads_csv(
     csv_path: str, default_region: str = ""
-) -> tuple[list[dict], list[str]]:
+) -> tuple[list[dict], list[str], list[dict]]:
     """Parse the EC-for-Leads CSV (local file) and hash PII at parse time.
 
     Required columns: Email, Phone Number, First Name, Last Name,
     Conversion Name, Conversion Time, Conversion Value, Conversion Currency.
     Optional: Order ID (Google's dedup key — strongly recommended so
-    re-uploads of the same source row don't double-count).
+    re-uploads of the same source row don't double-count), Country Code,
+    Postal Code. Returns ``(rows, errors, skipped)``; a record that ends before
+    the last required column is skipped with its ``source_line`` instead of
+    aborting the draft.
 
     The Email / Phone Number / First Name / Last Name columns hold RAW PII.
     Each is normalized (email→trim+lowercase, phone→E.164, names→trim+
@@ -1734,17 +1780,31 @@ def _parse_ec_for_leads_csv(
     """
     records, errors, timezone = _read_upload_csv(csv_path)
     if errors:
-        return [], errors
+        return [], errors, []
 
     _, raw_header = records[0]
     col, errors = _column_map(raw_header, _EXPECTED_EC_HEADERS)
     if errors:
-        return [], errors
+        return [], errors, []
     header = [cell.strip() for cell in raw_header]
     optional_col = {n: header.index(n) for n in _OPTIONAL_EC_HEADERS if n in header}
 
     out: list[dict] = []
+    skipped: list[dict] = []
     for source_line, raw in records[1:]:
+        if _short_row(raw, col):
+            skipped.append({
+                "row": source_line,
+                "reason": (
+                    f"short row: {len(raw)} of {len(header)} columns — it ends "
+                    "before the last required column"
+                ),
+            })
+            continue
+        # Optional columns may legitimately be missing: pad so that every index
+        # the header promises exists (Country Code and Postal Code used to
+        # raise IndexError here).
+        raw = _pad_to_header(raw, len(header))
         value, currency, problem = _parse_amount(
             raw[col["Conversion Value"]], raw[col["Conversion Currency"]]
         )
@@ -1753,10 +1813,7 @@ def _parse_ec_for_leads_csv(
             continue
         order_id = ""
         if "Order ID" in optional_col:
-            try:
-                order_id = raw[optional_col["Order ID"]].strip()
-            except IndexError:
-                pass
+            order_id = raw[optional_col["Order ID"]].strip()
         # Normalize THEN hash. Raw values are discarded immediately.
         email_norm = _normalize_email(raw[col["Email"]])
         raw_phone = raw[col["Phone Number"]]
@@ -1791,7 +1848,7 @@ def _parse_ec_for_leads_csv(
             # skipped_rows rather than as a parse warning.
             errors.append(
                 f"Row {source_line}: Country Code must be a two-letter ISO "
-                f"code, got {country!r} — the address was dropped for this row"
+                "code — the address was dropped for this row"
             )
             country = ""
             postal = ""
@@ -1811,7 +1868,7 @@ def _parse_ec_for_leads_csv(
             "currency_code": currency,
             "order_id": order_id,
         })
-    return out, errors
+    return out, errors, skipped
 
 
 def _has_complete_address(row: dict) -> bool:
@@ -1930,11 +1987,20 @@ def draft_upload_enhanced_conversions_for_leads(
             )
         }
 
-    rows, parse_errors = _parse_ec_for_leads_csv(csv_path, default_region)
+    rows, parse_errors, short_rows = _parse_ec_for_leads_csv(
+        csv_path, default_region
+    )
     if parse_errors and not rows:
-        return {"error": "CSV parse failed", "details": parse_errors}
+        return {
+            "error": "CSV parse failed",
+            "details": parse_errors,
+            **({"skipped_rows": short_rows} if short_rows else {}),
+        }
     if not rows:
-        return {"error": "CSV contained zero conversion rows"}
+        return {
+            "error": "CSV contained zero conversion rows",
+            **({"skipped_rows": short_rows} if short_rows else {}),
+        }
 
     # A row that cannot match would be uploaded to no effect and counted as a
     # success later. Google's identifier list is explicit about what an address
@@ -1942,7 +2008,7 @@ def draft_upload_enhanced_conversions_for_leads(
     # names and plain address — a postcode alone identifies nobody. So a row is
     # usable with an email, an E.164 phone, or that complete address.
     usable: list[dict] = []
-    skipped: list[dict] = []
+    skipped: list[dict] = list(short_rows)
     for row in rows:
         has_names = bool(row["first_name_sha256"] and row["last_name_sha256"])
         has_address = bool(

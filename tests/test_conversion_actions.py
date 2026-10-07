@@ -1,6 +1,7 @@
 """Tests for conversion-action write tools (create / update / remove)."""
 from __future__ import annotations
 
+import json
 import re
 
 from types import SimpleNamespace
@@ -922,7 +923,7 @@ _CALL_HEADER = (
 
 class TestParseCallConversionCsv:
     def test_missing_file(self, tmp_path):
-        rows, errors = conversion_actions._parse_call_conversion_csv(
+        rows, errors, _skipped = conversion_actions._parse_call_conversion_csv(
             str(tmp_path / "nope.csv")
         )
         assert rows == []
@@ -936,7 +937,7 @@ class TestParseCallConversionCsv:
             + "+14155550142,2026-03-01T12:00:00Z,My Action,"
             "2026-03-01T13:00:00Z,250.00,usd\n"
         )
-        rows, errors = conversion_actions._parse_call_conversion_csv(str(p))
+        rows, errors, _skipped = conversion_actions._parse_call_conversion_csv(str(p))
         assert errors == []
         assert len(rows) == 1
         assert rows[0]["caller_id"] == "+14155550142"
@@ -950,7 +951,7 @@ class TestParseCallConversionCsv:
             "Conversion Value,Conversion Currency\n"
             "+14155550142,X,2026-03-01T13:00:00Z,10,USD\n"
         )
-        rows, errors = conversion_actions._parse_call_conversion_csv(str(p))
+        rows, errors, _skipped = conversion_actions._parse_call_conversion_csv(str(p))
         assert rows == []
         assert any("Call Start Time" in e for e in errors)
 
@@ -1251,7 +1252,7 @@ class TestParseEcForLeadsCsvHashesPii:
             "User@Example.com,+1 415 555 0142,Test,User,My Action,"
             "2026-03-01T12:00:00Z,250.00,USD\n",
         )
-        rows, errors = conversion_actions._parse_ec_for_leads_csv(path)
+        rows, errors, _skipped = conversion_actions._parse_ec_for_leads_csv(path)
         assert errors == []
         r = rows[0]
         assert r["email_sha256"] == _EMAIL_HASH
@@ -1268,7 +1269,7 @@ class TestParseEcForLeadsCsvHashesPii:
             _EC_HEADER + "\n"
             ",+14155550142,,,My Action,2026-03-01T12:00:00Z,200.00,USD\n",
         )
-        rows, _ = conversion_actions._parse_ec_for_leads_csv(path)
+        rows, _errors, _skipped = conversion_actions._parse_ec_for_leads_csv(path)
         assert rows[0]["email_sha256"] == ""
         assert rows[0]["first_name_sha256"] == ""
         assert rows[0]["phone_sha256"] == _PHONE_HASH
@@ -1280,7 +1281,7 @@ class TestParseEcForLeadsCsvHashesPii:
             "user@example.com,+14155550142,Test,User,My Action,"
             "2026-03-01T12:00:00Z,250.00,USD,ORD-001\n",
         )
-        rows, _ = conversion_actions._parse_ec_for_leads_csv(path)
+        rows, _errors, _skipped = conversion_actions._parse_ec_for_leads_csv(path)
         assert rows[0]["order_id"] == "ORD-001"
 
     def test_order_id_defaults_empty_when_absent(self, tmp_path):
@@ -1290,7 +1291,7 @@ class TestParseEcForLeadsCsvHashesPii:
             "user@example.com,+14155550142,Test,User,My Action,"
             "2026-03-01T12:00:00Z,250.00,USD\n",
         )
-        rows, _ = conversion_actions._parse_ec_for_leads_csv(path)
+        rows, _errors, _skipped = conversion_actions._parse_ec_for_leads_csv(path)
         assert rows[0]["order_id"] == ""
 
     def test_missing_required_column(self, tmp_path):
@@ -1300,7 +1301,7 @@ class TestParseEcForLeadsCsvHashesPii:
             "Conversion Value,Conversion Currency\n"
             "user@example.com,+14155550142,X,2026-03-01T12:00:00Z,10,USD\n",
         )
-        rows, errors = conversion_actions._parse_ec_for_leads_csv(path)
+        rows, errors, _skipped = conversion_actions._parse_ec_for_leads_csv(path)
         assert rows == []
         assert any("First Name" in e or "Last Name" in e for e in errors)
 
@@ -1846,11 +1847,138 @@ class TestCsvInputHardening:
             + "user@example.com,+14155550142,Test,User,My Action,"
               "2026-03-01T12:00:00Z,200.00,USD\n"
         )
-        rows, errors = conversion_actions._parse_ec_for_leads_csv(
+        rows, errors, _skipped = conversion_actions._parse_ec_for_leads_csv(
             self._write(tmp_path, body)
         )
         assert errors == []
         assert len(rows) == 1
+
+
+class TestWarningsNeverEchoCells:
+    """A shifted column turns a neighbouring cell into the warning text.
+
+    That text travels into ``changes``, the preview and the audit log, so a
+    column that is off by one must not print an address or a name.
+    """
+
+    def _write(self, tmp_path, body: str):
+        path = tmp_path / "upload.csv"
+        path.write_text(body, encoding="utf-8")
+        return str(path)
+
+    def test_a_bad_currency_names_the_column_not_the_cell(
+        self, config, tmp_path, monkeypatch
+    ):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CALLS")
+        path = self._write(
+            tmp_path,
+            _CALL_HEADER
+            + "+14155550142,2026-03-01T12:00:00Z,My Action,"
+            "2026-03-01T13:00:00Z,10,max.schmidt@web.de\n",
+        )
+
+        result = conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", csv_path=path
+        )
+
+        text = " ".join(result["details"])
+        assert "Row 2" in text
+        assert "Conversion Currency" in text
+        assert "max.schmidt" not in text.lower()
+
+    def test_a_bad_country_code_keeps_the_cell_out_of_the_plan(
+        self, config, tmp_path, monkeypatch
+    ):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CLICKS")
+        path = self._write(
+            tmp_path,
+            _EC_HEADER_ADDRESS + "\n"
+            "user@example.com,,Anna,Lena,My Action,2026-03-01T12:00:00Z,10,USD,"
+            "max.schmidt@web.de,85521\n",
+        )
+
+        result = conversion_actions.draft_upload_enhanced_conversions_for_leads(
+            config, customer_id="1234567890", csv_path=path
+        )
+
+        changes = _stored_plan(result).changes
+        text = " ".join(changes["parse_warnings"])
+        assert "Row 2" in text
+        assert "Country Code" in text
+        # Not in the warning, and not anywhere else in the plan summary either.
+        assert "max.schmidt" not in text.lower()
+        assert "max.schmidt" not in json.dumps(changes, default=str).lower()
+
+
+class TestShortRowsAreSkippedNotFatal:
+    """A record that stops early is a skipped row, not an IndexError."""
+
+    def _write(self, tmp_path, body: str):
+        path = tmp_path / "upload.csv"
+        path.write_text(body, encoding="utf-8")
+        return str(path)
+
+    def test_a_truncated_call_row_is_skipped_with_its_line(
+        self, config, tmp_path, monkeypatch
+    ):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CALLS")
+        path = self._write(
+            tmp_path,
+            _CALL_HEADER
+            + "+14155550142,2026-03-01T12:00:00Z,My Action\n"
+            + "+14155550143,2026-03-01T12:00:00Z,My Action,"
+            "2026-03-01T13:00:00Z,10,USD\n",
+        )
+
+        result = conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", csv_path=path
+        )
+
+        changes = _stored_plan(result).changes
+        assert changes["row_count"] == 1
+        assert changes["skipped_rows"] == [
+            {"row": 2, "reason": changes["skipped_rows"][0]["reason"]}
+        ]
+        assert "short row" in changes["skipped_rows"][0]["reason"]
+
+    def test_a_truncated_ec_row_is_skipped_with_its_line(
+        self, config, tmp_path, monkeypatch
+    ):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CLICKS")
+        path = self._write(
+            tmp_path,
+            _EC_HEADER + "\n"
+            "user@example.com,,Anna,Lena,My Action\n"
+            "second@example.com,,Ben,Lena,My Action,2026-03-01T12:00:00Z,10,USD\n",
+        )
+
+        result = conversion_actions.draft_upload_enhanced_conversions_for_leads(
+            config, customer_id="1234567890", csv_path=path
+        )
+
+        changes = _stored_plan(result).changes
+        assert changes["row_count"] == 1
+        assert [entry["row"] for entry in changes["skipped_rows"]] == [2]
+        assert "short row" in changes["skipped_rows"][0]["reason"]
+
+    def test_missing_optional_columns_do_not_skip_the_row(
+        self, config, tmp_path, monkeypatch
+    ):
+        """Country Code and Postal Code may be absent — that used to raise."""
+        _patch_drafts_client(monkeypatch, "UPLOAD_CLICKS")
+        path = self._write(
+            tmp_path,
+            _EC_HEADER_ADDRESS + "\n"
+            "user@example.com,,Anna,Lena,My Action,2026-03-01T12:00:00Z,10,USD\n",
+        )
+
+        result = conversion_actions.draft_upload_enhanced_conversions_for_leads(
+            config, customer_id="1234567890", csv_path=path
+        )
+
+        changes = _stored_plan(result).changes
+        assert changes["row_count"] == 1
+        assert changes["skipped_rows"] == []
 
 
 class TestUploadBatching:
@@ -2642,7 +2770,9 @@ class TestRecordStartLine:
             + "+14155550142,2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,10,USD\n"
         )
 
-        rows, _ = conversion_actions._parse_call_conversion_csv(str(path))
+        rows, _errors, _skipped = conversion_actions._parse_call_conversion_csv(
+            str(path)
+        )
         assert rows[0]["source_line"] == 2      # header is line 1
         upload = _FakeUploadService(results_count=1)
         client = _client_with(
