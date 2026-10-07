@@ -3233,7 +3233,7 @@ class TestPerLineErrors:
             ),
         )
 
-    def _plan(self, config, tmp_path, monkeypatch):
+    def _plan(self, config, tmp_path, monkeypatch, upload=None):
         _patch_drafts_client(monkeypatch, "UPLOAD_CALLS")
         path = tmp_path / "phone.csv"
         path.write_text(
@@ -3246,7 +3246,7 @@ class TestPerLineErrors:
         preview = conversion_actions.draft_upload_call_conversions(
             config, customer_id="1234567890", csv_path=str(path)
         )
-        upload = _FakeUploadService(results_count=1)
+        upload = upload or _FakeUploadService(results_count=1)
         client = _client_with(
             upload_service=upload, ads_service=_EchoActionRows("UPLOAD_CALLS")
         )
@@ -3270,7 +3270,14 @@ class TestPerLineErrors:
             result["result"]["row_errors"]
         )
 
-    def test_the_dry_run_names_the_line_too(self, tmp_path, monkeypatch):
+    def test_a_dry_run_reports_the_rows_instead_of_failing(
+        self, tmp_path, monkeypatch
+    ):
+        """A row that cannot match does not invalidate the whole request.
+
+        The real apply would upload the other row and report this one again, so
+        the dry run has to say the same thing instead of DRY_RUN_FAILED.
+        """
         config = self._config(tmp_path, )
         preview, upload, client = self._plan(config, tmp_path, monkeypatch)
         upload.partial_failure = _partial_failure_with_index(
@@ -3287,10 +3294,44 @@ class TestPerLineErrors:
             config, plan_id=preview["plan_id"], dry_run=True
         )
 
+        assert result["status"] == "DRY_RUN_SUCCESS", result
+        # Same shape the apply reports: a summary entry plus the CSV line.
+        assert {
+            "batch": 1, "line": 3, "error": "Conversion action is invalid"
+        } in result["row_errors"]
+        assert any(
+            entry.get("type") == "partial_failure" for entry in result["row_errors"]
+        )
+        assert result["checks"]["partial_failures"] == 1
+        assert "carry out every other row" in result["note"]
+        # The dry-run marker is set, so two-phase apply lets the real run go.
+        assert preview_store.get_plan(preview["plan_id"]).dry_run_result is not None
+
+    def test_a_dry_run_google_rejects_outright_still_fails(
+        self, tmp_path, monkeypatch
+    ):
+        """A rejected request is a failure — that is what DRY_RUN_FAILED means."""
+        config = self._config(tmp_path)
+        upload = _FakeUploadService(
+            results_count=1,
+            fail_on_call=1,
+            fail_exception=_google_rejection("INVALID_ARGUMENT"),
+        )
+        preview, _upload, _client = self._plan(
+            config, tmp_path, monkeypatch, upload=upload
+        )
+        monkeypatch.setattr(
+            write,
+            "_validate_with_google",
+            lambda cfg, plan: write._execute_plan(cfg, plan, validate_only=True),
+        )
+
+        result = write.confirm_and_apply(
+            config, plan_id=preview["plan_id"], dry_run=True
+        )
+
         assert result["status"] == "DRY_RUN_FAILED", result
-        assert result["row_errors"] == [
-            {"batch": 1, "line": 3, "error": "Conversion action is invalid"}
-        ]
+        assert "The real apply would fail the same way." in result["message"]
 
 
 class TestThePlanIsClaimedBeforeUploading:

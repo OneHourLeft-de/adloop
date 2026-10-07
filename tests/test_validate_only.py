@@ -161,6 +161,30 @@ def test_a_partial_failure_in_validation_raises():
         )
 
 
+def test_an_upload_partial_failure_is_reported_not_raised():
+    """A per-row problem is the normal answer for an upload, not a broken request.
+
+    Google requires `partial_failure` on uploads, and validate-only returns
+    errors but no results. The real apply uploads the rows that match and lists
+    the rest, so the dry run has to carry the same detail back instead of
+    failing the whole validation.
+    """
+    failure = SimpleNamespace(code=3, message="CALL_NOT_FOUND")
+    fake = FakeAdsClient(partial_failure=failure)
+    client = ValidateOnlyClient(fake)
+
+    response = client.get_service(
+        "ConversionUploadService"
+    ).upload_click_conversions(
+        customer_id="123", conversions=[Bag(), Bag()], partial_failure=True,
+    )
+
+    assert client.validated_calls == 1
+    assert client.partial_failures == 1
+    assert response.partial_failure_error is failure
+    assert len(response.results) == 2   # placeholders, one per conversion
+
+
 @pytest.fixture
 def real_validation(monkeypatch):
     """Undo the suite's offline stub and hand the dry run a fake Ads client."""

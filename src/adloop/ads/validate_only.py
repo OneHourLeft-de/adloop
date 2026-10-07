@@ -57,6 +57,10 @@ class ValidateOnlyClient:
         self._client = client
         self.validated_calls = 0
         self.skipped_calls = 0
+        # Upload calls whose validate-only answer carried per-row problems.
+        # They are not failures: the real apply uploads the rows that match and
+        # reports the others, so the dry run reports the same thing.
+        self.partial_failures = 0
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._client, name)
@@ -94,6 +98,18 @@ class _ValidateOnlyService:
                 self._owner.validated_calls += 1
                 failure = getattr(response, "partial_failure_error", None)
                 if failure is not None and getattr(failure, "code", 0):
+                    if attr.startswith("upload"):
+                        # `partial_failure` is required for uploads (the proto
+                        # says "always set to true"), so a per-row problem is
+                        # not a broken request. Validate-only returns errors but
+                        # no results, so the placeholder results stand in and
+                        # the real failure proto rides along for the applier.
+                        self._owner.partial_failures += 1
+                        placeholder = _placeholder_response(
+                            request.customer_id, len(operations), False
+                        )
+                        placeholder.partial_failure_error = failure
+                        return placeholder
                     raise ValidateOnlyFailure(
                         getattr(failure, "message", "") or str(failure),
                         failure=failure,

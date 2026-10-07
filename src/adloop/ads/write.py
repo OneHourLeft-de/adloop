@@ -2744,9 +2744,18 @@ def confirm_and_apply(
             # Google reports per-conversion errors by request index; the upload
             # appliers translate them into CSV lines before raising.
             from adloop.ads.conversion_actions import PartialUploadError
+            from adloop.ads.validate_only import ValidateOnlyFailure
 
             row_errors = (
                 e.row_errors if isinstance(e, PartialUploadError) else []
+            )
+            # A validate-only partial failure is not a broken request: Google
+            # rejected some operations and the apply would carry out the rest.
+            # Saying "the real apply would fail the same way" is only true when
+            # the request as a whole was rejected.
+            partial_rejection = (
+                isinstance(e, ValidateOnlyFailure)
+                and getattr(e, "failure", None) is not None
             )
             log_mutation(
                 config.safety.log_file,
@@ -2772,8 +2781,14 @@ def confirm_and_apply(
                 **({"row_errors": row_errors} if row_errors else {}),
                 "message": (
                     f"The dry run {checked_against} and found a problem; "
-                    "nothing was changed. The real apply would fail the same "
-                    "way. Fix the cause and draft again."
+                    "nothing was changed. "
+                    + (
+                        "Google rejected part of the request — the apply would "
+                        "carry out the rest and report these operations again. "
+                        if partial_rejection
+                        else "The real apply would fail the same way. "
+                    )
+                    + "Fix the cause and draft again."
                 ),
             }
         log_mutation(
@@ -2810,6 +2825,7 @@ def confirm_and_apply(
                 "target and re-checked the safety caps; nothing was sent."
             )
         if validation is not None:
+            row_errors = validation.pop("row_errors", [])
             response["checks"] = validation
             response["note"] = (
                 "Google Ads validated this exact change (validate_only) and "
@@ -2820,6 +2836,16 @@ def confirm_and_apply(
                     f" {validation['skipped_calls']} later step(s) build on "
                     "objects an earlier step would create, so Google could "
                     "only validate the step(s) before them."
+                )
+            if row_errors:
+                # A per-row problem is not a broken request: the apply sends
+                # the file and reports those rows again. Say that here instead
+                # of letting the caller discover it at apply time.
+                response["row_errors"] = row_errors
+                response["note"] += (
+                    f" Google reported problems for {len(row_errors)} row(s) "
+                    "in validate-only mode; the apply would send the file "
+                    "anyway and carry out every other row."
                 )
         if forced_by_config:
             # The caller passed dry_run=false but safety.require_dry_run
@@ -3767,10 +3793,17 @@ def _execute_plan(
         # result instead of raising; in a dry run that is still a failure.
         if isinstance(result, dict) and result.get("error"):
             raise ValueError(result["error"])
-        return {
+        validation = {
             "validated_calls": validator.validated_calls,
             "skipped_calls": validator.skipped_calls,
         }
+        # Uploads report per-row problems instead of failing the request (see
+        # ValidateOnlyClient), so their detail has to reach the caller.
+        if isinstance(result, dict) and result.get("row_errors"):
+            validation["row_errors"] = result["row_errors"]
+        if validator.partial_failures:
+            validation["partial_failures"] = validator.partial_failures
+        return validation
 
     return _dispatch_ads_plan(client, cid, plan)
 
