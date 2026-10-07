@@ -2842,9 +2842,13 @@ def confirm_and_apply(
                 # the file and reports those rows again. Say that here instead
                 # of letting the caller discover it at apply time.
                 response["row_errors"] = row_errors
+                # Only entries that name a CSV line are rows; the batch summary
+                # that Google's own message produces is not one.
+                per_row = [entry for entry in row_errors if "line" in entry]
                 response["note"] += (
-                    f" Google reported problems for {len(row_errors)} row(s) "
-                    "in validate-only mode; the apply would send the file "
+                    " Google reported problems "
+                    + (f"for {len(per_row)} row(s) " if per_row else "")
+                    + "in validate-only mode; the apply would send the file "
                     "anyway and carry out every other row."
                 )
         if forced_by_config:

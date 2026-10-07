@@ -3614,6 +3614,8 @@ class TestPerLineErrors:
             entry.get("type") == "partial_failure" for entry in result["row_errors"]
         )
         assert result["checks"]["partial_failures"] == 1
+        # Only the entry with a CSV line is a row — the batch summary is not.
+        assert "problems for 1 row(s)" in result["note"]
         assert "carry out every other row" in result["note"]
         # The dry-run marker is set, so two-phase apply lets the real run go.
         assert preview_store.get_plan(preview["plan_id"]).dry_run_result is not None
