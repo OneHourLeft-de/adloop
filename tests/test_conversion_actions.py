@@ -2152,6 +2152,55 @@ class TestSkippedAndUnmatchableRows:
         assert "default_region" in plan.changes["skipped_rows"][1]["reason"]
         assert len(plan.apply_only_payload["rows"]) == 1
 
+    def test_an_email_that_is_not_an_address_does_not_make_a_row_usable(
+        self, config, tmp_path, monkeypatch
+    ):
+        """`n/a` in the Email column used to hash to a truthy value."""
+        _patch_drafts_client(monkeypatch, "UPLOAD_CLICKS")
+        path = tmp_path / "leads.csv"
+        path.write_text(
+            _EC_HEADER + "\n"
+            "n/a,,,,My Action,2026-03-01T12:00:00Z,10,USD\n"
+            "user@example.com,,Anna,Lena,My Action,2026-03-01T13:00:00Z,10,USD\n"
+        )
+
+        result = conversion_actions.draft_upload_enhanced_conversions_for_leads(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+        plan = _stored_plan(result)
+
+        assert plan.changes["row_count"] == 1
+        assert plan.changes["skipped_count"] == 1
+        skipped = plan.changes["skipped_rows"][0]
+        assert skipped["row"] == 2
+        assert "not an address" in skipped["reason"]
+
+    def test_an_unusable_email_is_dropped_and_warned_about(
+        self, config, tmp_path, monkeypatch
+    ):
+        """The phone still identifies the row, so it uploads without the email."""
+        _patch_drafts_client(monkeypatch, "UPLOAD_CLICKS")
+        path = tmp_path / "leads.csv"
+        path.write_text(
+            _EC_HEADER + "\n"
+            "n/a,+14155550142,Anna,Lena,My Action,2026-03-01T12:00:00Z,10,USD\n"
+        )
+
+        result = conversion_actions.draft_upload_enhanced_conversions_for_leads(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+        plan = _stored_plan(result)
+
+        assert plan.changes["row_count"] == 1
+        assert plan.changes["rows_with_email"] == 0
+        assert plan.changes["rows_with_phone"] == 1
+        row = plan.apply_only_payload["rows"][0]
+        assert row["email_sha256"] == ""
+        assert row["phone_sha256"]
+        warnings = " ".join(plan.changes["match_warnings"])
+        assert "not an address" in warnings
+        assert "[2]" in warnings   # the affected CSV line
+
     def test_a_csv_of_only_unusable_call_rows_plans_nothing(
         self, config, tmp_path, monkeypatch
     ):
@@ -2585,9 +2634,14 @@ class TestNormalizationMatchesGoogleDocs:
         assert conversion_actions._normalize_name("  Anna   Maria ") == "anna   maria"
         assert conversion_actions._normalize_name("von der Berg") == "von der berg"
 
-    def test_a_malformed_address_is_left_alone(self):
-        # No "@": whiten it, do not invent a domain.
-        assert conversion_actions._normalize_email("Not An Email") == "notanemail"
+    def test_a_malformed_value_is_not_an_address(self):
+        # No "@" (or an empty side) is not an address. A CRM export writes
+        # "n/a" into empty columns, and hashing that would look like a usable
+        # identifier while matching nobody.
+        assert conversion_actions._normalize_email("Not An Email") == ""
+        assert conversion_actions._normalize_email("n/a") == ""
+        assert conversion_actions._normalize_email("@example.com") == ""
+        assert conversion_actions._normalize_email("user@") == ""
         assert conversion_actions._normalize_email("") == ""
 
 

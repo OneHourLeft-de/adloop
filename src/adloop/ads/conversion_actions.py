@@ -609,11 +609,17 @@ def _normalize_email(email: str) -> str:
       per-language samples on that page leave the plus suffix alone, so this
       follows the rule, not the samples;
     * every other domain keeps dots and plus tags.
+
+    A value that is not an address at all (no ``@``, or an empty side) hashes
+    to nothing: a CRM export writes ``n/a`` or ``-`` into an empty column, and
+    a hash of that would look like a usable identifier while matching nobody.
     """
     value = re.sub(r"\s+", "", (email or "").lower())
     if "@" not in value:
-        return value
+        return ""
     local, _, domain = value.rpartition("@")
+    if not local or not domain:
+        return ""
     if domain in ("gmail.com", "googlemail.com"):
         local = local.split("+", 1)[0].replace(".", "")
     return f"{local}@{domain}"
@@ -1868,7 +1874,8 @@ def _parse_ec_for_leads_csv(
         if "Order ID" in optional_col:
             order_id = raw[optional_col["Order ID"]].strip()
         # Normalize THEN hash. Raw values are discarded immediately.
-        email_norm = _normalize_email(raw[col["Email"]])
+        raw_email = raw[col["Email"]]
+        email_norm = _normalize_email(raw_email)
         raw_phone = raw[col["Phone Number"]]
         phone_norm = _normalize_phone_e164(raw_phone, default_region)
         # A phone that is not E.164 hashes to a value Google can never match —
@@ -1915,6 +1922,7 @@ def _parse_ec_for_leads_csv(
         out.append({
             "source_line": source_line,
             "email_sha256": _sha256_hex(email_norm),
+            "email_was_given": bool((raw_email or "").strip()),
             "phone_sha256": _sha256_hex(phone_norm) if phone_usable else "",
             "phone_was_given": bool((raw_phone or "").strip()),
             "phone_usable": phone_usable,
@@ -1945,6 +1953,7 @@ def _match_warnings(
     names_without_address: list[int],
     address_without_names: list[int],
     unusable_phones: list[int],
+    unusable_emails: list[int],
 ) -> list[str]:
     """Warnings about identifiers that will not match, said up front.
 
@@ -1976,6 +1985,13 @@ def _match_warnings(
             "are uploaded without the phone identifier — add a country code, "
             "or pass default_region for national formats; first affected rows: "
             f"{unusable_phones[:5]}."
+        )
+    if unusable_emails:
+        warnings.append(
+            f"{len(unusable_emails)} row(s) carry an email that is not an "
+            "address (no '@', or an empty side), so the hashed value cannot "
+            "match. Those rows are uploaded without the email identifier; "
+            f"first affected rows: {unusable_emails[:5]}."
         )
     return warnings
 
@@ -2090,6 +2106,11 @@ def draft_upload_enhanced_conversions_for_leads(
             )
         elif row["phone_was_given"]:
             reason = "phone is not E.164 and the row has no other identifier"
+        elif row["email_was_given"]:
+            reason = (
+                "email is not an address (no '@', or an empty side) and the "
+                "row has no other identifier"
+            )
         elif row["postal_code"] or row["country_code"]:
             reason = (
                 "only part of an address (no names) — that cannot match"
@@ -2141,6 +2162,11 @@ def draft_upload_enhanced_conversions_for_leads(
         _source_line(r, index)
         for index, r in enumerate(rows, start=1)
         if r["phone_was_given"] and not r["phone_usable"]
+    ]
+    unusable_emails = [
+        _source_line(r, index)
+        for index, r in enumerate(rows, start=1)
+        if r["email_was_given"] and not r["email_sha256"]
     ]
     names_without_address = [
         _source_line(r, index)
@@ -2218,7 +2244,10 @@ def draft_upload_enhanced_conversions_for_leads(
             "parse_warnings": parse_errors,
             "dedup_warnings": dedup_warnings,
             "match_warnings": _match_warnings(
-                names_without_address, address_without_names, unusable_phones
+                names_without_address,
+                address_without_names,
+                unusable_phones,
+                unusable_emails,
             ),
             "sample_rows": [
                 {
