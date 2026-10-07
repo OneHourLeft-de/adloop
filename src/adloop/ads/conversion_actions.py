@@ -1691,6 +1691,45 @@ def _upload_in_batches(
     }
 
 
+def _prepare_upload(
+    client: object, changes: dict
+) -> tuple[list[dict], dict, dict | None, object]:
+    """Resolve everything an upload needs before its first request goes out.
+
+    Client, service, payload and conversion-action lookup all happen here, and
+    every failure is reported as ``UploadNotSentError``: at this point no
+    request has left the process, so the caller must keep the plan and let the
+    caller retry instead of retiring a plan that could still be applied.
+    """
+    try:
+        rows = changes.get("rows") or []
+        if not rows:
+            expected = int(changes.get("row_count") or 0)
+            if expected:
+                # row_count > 0 without the payload means the plan store dropped
+                # ``apply_only_payload``. Fail loudly; an empty upload that
+                # reports success is the one outcome nobody would notice.
+                raise UploadNotSentError(
+                    f"This plan expects {expected} row(s) but carries none: the "
+                    "plan store did not persist ChangePlan.apply_only_payload. "
+                    "Nothing was uploaded — draft the upload again."
+                )
+            return [], {}, None, None
+        return (
+            rows,
+            changes["conversion_actions"],
+            changes.get("consent"),
+            client.get_service("ConversionUploadService"),
+        )
+    except UploadNotSentError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — re-raised as "not sent"
+        raise UploadNotSentError(
+            "The upload could not be prepared, so nothing was sent and the "
+            f"plan is still usable: {exc}"
+        ) from exc
+
+
 def _apply_upload_call_conversions(
     client: object, cid: str, changes: dict
 ) -> dict:
@@ -1700,23 +1739,9 @@ def _apply_upload_call_conversions(
     there at preview time) — the CSV is NOT re-read. Batches are sent one
     request at a time; a failure says which rows are already uploaded.
     """
-    rows = changes.get("rows") or []
+    rows, action_resources, consent, upload_service = _prepare_upload(client, changes)
     if not rows:
-        expected = int(changes.get("row_count") or 0)
-        if expected:
-            # row_count > 0 without the payload means the plan store dropped
-            # ``apply_only_payload``. Fail loudly; an empty upload that reports
-            # success is the one outcome nobody would notice.
-            raise UploadNotSentError(
-                f"This plan expects {expected} row(s) but carries none: the plan "
-                "store did not persist ChangePlan.apply_only_payload. Nothing "
-                "was uploaded — draft the upload again."
-            )
         return {"error": "Plan contained zero call-conversion rows"}
-
-    action_resources = changes["conversion_actions"]
-    consent = changes.get("consent")
-    upload_service = client.get_service("ConversionUploadService")
 
     def _build(chunk: list[dict]):
         payload: list = []
@@ -2226,20 +2251,9 @@ def _apply_upload_enhanced_conversions_for_leads(
     (``apply_only_payload``) — the CSV is NOT re-read, so no raw PII is touched
     here. Batched like the call upload.
     """
-    rows = changes.get("rows") or []
+    rows, action_resources, consent, upload_service = _prepare_upload(client, changes)
     if not rows:
-        expected = int(changes.get("row_count") or 0)
-        if expected:
-            raise UploadNotSentError(
-                f"This plan expects {expected} row(s) but carries none: the plan "
-                "store did not persist ChangePlan.apply_only_payload. Nothing "
-                "was uploaded — draft the upload again."
-            )
         return {"error": "Plan contained zero EC-for-leads rows"}
-
-    action_resources = changes["conversion_actions"]
-    consent = changes.get("consent")
-    upload_service = client.get_service("ConversionUploadService")
 
     def _build(chunk: list[dict]):
         payload: list = []

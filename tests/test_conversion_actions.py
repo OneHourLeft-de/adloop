@@ -3506,6 +3506,121 @@ class TestThePlanIsClaimedBeforeUploading:
         assert "Resume the CSV at line 2002" in result["message"]
 
 
+class _NoUploadService:
+    """A client whose ConversionUploadService cannot be reached."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+
+    def get_service(self, name, *args, **kwargs):
+        if name == "ConversionUploadService":
+            raise RuntimeError("service unavailable")
+        return self._inner.get_service(name, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+class TestAPreSendFailureKeepsThePlan:
+    """Nothing left the process, so the plan must stay usable.
+
+    Client construction, credentials, the upload service and the payload
+    lookup all run before the first request. Retiring the plan for a failure
+    there forces a whole new draft for a retry that cannot duplicate anything,
+    and the caller has no way to tell it apart from a real partial upload.
+    """
+
+    def _config(self, tmp_path):
+        return AdLoopConfig(
+            ads=AdsConfig(customer_id="123-456-7890"),
+            safety=SafetyConfig(
+                require_dry_run=False, log_file=str(tmp_path / "audit.log")
+            ),
+        )
+
+    def _plan(self, config, tmp_path, monkeypatch, *, rows=1):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CALLS")
+        path = tmp_path / "phone.csv"
+        path.write_text(
+            _CALL_HEADER
+            + "".join(
+                f"+1415555{i:04d},2026-03-01T12:00:00Z,My Action,"
+                f"2026-03-01T13:00:00Z,10,USD\n"
+                for i in range(rows)
+            )
+        )
+        preview = conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+        upload = _FakeUploadService(results_count=10_000)
+        client = _client_with(
+            upload_service=upload, ads_service=_EchoActionRows("UPLOAD_CALLS")
+        )
+        monkeypatch.setattr("adloop.ads.client.get_ads_client", lambda _cfg: client)
+        return preview, upload, client
+
+    def test_a_client_that_cannot_be_built_keeps_the_plan(
+        self, tmp_path, monkeypatch
+    ):
+        config = self._config(tmp_path)
+        preview, upload, client = self._plan(config, tmp_path, monkeypatch)
+
+        def boom(_config):
+            raise RuntimeError("token expired")
+
+        monkeypatch.setattr("adloop.ads.client.get_ads_client", boom)
+        result = write.confirm_and_apply(
+            config, plan_id=preview["plan_id"], dry_run=False
+        )
+
+        assert "still usable" in result["error"], result
+        assert preview_store.get_plan(preview["plan_id"]) is not None
+        assert upload.calls == []
+
+        # The retry works once the client can be built again — no re-draft.
+        monkeypatch.setattr("adloop.ads.client.get_ads_client", lambda _cfg: client)
+        again = write.confirm_and_apply(
+            config, plan_id=preview["plan_id"], dry_run=False
+        )
+        assert again["status"] == "APPLIED", again
+        assert len(upload.calls) == 1
+
+    def test_an_unreachable_upload_service_keeps_the_plan(
+        self, tmp_path, monkeypatch
+    ):
+        config = self._config(tmp_path)
+        preview, upload, client = self._plan(config, tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "adloop.ads.client.get_ads_client", lambda _cfg: _NoUploadService(client)
+        )
+
+        result = write.confirm_and_apply(
+            config, plan_id=preview["plan_id"], dry_run=False
+        )
+
+        assert "still usable" in result["error"], result
+        assert preview_store.get_plan(preview["plan_id"]) is not None
+        assert upload.calls == []
+
+    def test_a_payload_the_plan_does_not_carry_keeps_the_plan(
+        self, tmp_path, monkeypatch
+    ):
+        """A KeyError before the first request is not a partial upload."""
+        config = self._config(tmp_path)
+        preview, upload, _client = self._plan(config, tmp_path, monkeypatch)
+        plan = preview_store.get_plan(preview["plan_id"])
+        plan.changes.pop("conversion_actions")   # what a half-migrated store looks like
+        preview_store.store_plan(plan)
+
+        result = write.confirm_and_apply(
+            config, plan_id=preview["plan_id"], dry_run=False
+        )
+
+        assert "still usable" in result["error"], result
+        assert preview_store.get_plan(preview["plan_id"]) is not None
+        assert upload.calls == []
+
+
 class TestNothingSentIsClassifiedHonestly:
     """Phase 1 sends nothing — but only the *first* batch means "nothing at all".
 

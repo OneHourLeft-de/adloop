@@ -3781,8 +3781,21 @@ def _execute_plan(
 
         return _apply_create_key_event(config, plan.changes)
 
-    client = get_ads_client(config)
-    cid = normalize_customer_id(plan.customer_id)
+    try:
+        client = get_ads_client(config)
+        cid = normalize_customer_id(plan.customer_id)
+    except Exception as exc:  # noqa: BLE001 — uploads stay retryable
+        if plan.operation.startswith("upload_"):
+            # Credentials or client construction failed before anything could
+            # leave the process. Retiring the plan here would force a whole new
+            # draft for a retry that cannot have duplicated anything.
+            from adloop.ads.conversion_actions import UploadNotSentError
+
+            raise UploadNotSentError(
+                "Could not reach Google Ads for this upload, so nothing was "
+                f"sent and the plan is still usable: {exc}"
+            ) from exc
+        raise
 
     if validate_only:
         from adloop.ads.validate_only import ValidateOnlyClient
