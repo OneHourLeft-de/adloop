@@ -310,13 +310,20 @@ def _structured_error(fn_name: str, exc: Exception) -> dict:
         }
 
     if "deleted_client" in err_lower or "invalid_client" in err_lower:
+        from adloop.runtime import deployment_mode
+
         return {
             "error": (
                 "Authentication failed — the OAuth client behind your stored "
                 "credentials no longer exists or is invalid."
             ),
+            # On a hosted server the user never sees an OAuth client: the
+            # fix is reconnecting, and pointing at a product would be an ad.
             "hint": (
-                "If you set up AdLoop before v0.10 with its bundled "
+                "Reconnect Google in your AdLoop Cloud dashboard "
+                "(Settings → Google), then retry."
+                if deployment_mode() == "server"
+                else "If you set up AdLoop before v0.10 with its bundled "
                 "credentials: that shared Google Cloud project has been "
                 "retired. Fastest fix: AdLoop Cloud (https://getadloop.com) — "
                 "connect Google in two clicks, no Google Cloud project "

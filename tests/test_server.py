@@ -27,6 +27,24 @@ def test_structured_error_steers_deleted_oauth_client_to_cloud_or_byo():
     assert "adloop init" in result["hint"]
 
 
+def test_deleted_oauth_client_on_a_hosted_server_says_reconnect_not_buy():
+    """A hosted user has no OAuth client of their own, and an ad for the
+    product they are already using is noise (and directories forbid it)."""
+    from adloop import runtime
+
+    error = Exception("invalid_client: The OAuth client was not found.")
+    runtime.set_deployment_mode("server")
+    try:
+        result = _structured_error("get_campaign_performance", error)
+    finally:
+        runtime.set_deployment_mode("local")
+
+    assert result["auth_error"] == "OAUTH_CLIENT_DELETED_OR_INVALID"
+    assert "Reconnect Google" in result["hint"]
+    assert "getadloop.com" not in result["hint"]
+    assert "adloop init" not in result["hint"]
+
+
 def test_structured_error_detects_invalid_client_secret():
     error = Exception(
         "('invalid_client: Unauthorized', {'error': 'invalid_client', "
