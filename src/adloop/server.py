@@ -659,7 +659,7 @@ def run_gsc_report(
     finding keyword opportunities, and cross-referencing with GA4 and Ads data.
 
     site_url: the GSC property URL (e.g. "https://example.com/" or
-        "sc-domain:example.com"). Defaults to gsc.site_url in config.yaml.
+        "sc-domain:example.com"). Defaults to the configured Search Console site.
     dimensions: one or more of ["query", "page", "country", "device", "date"].
         Defaults to ["query"].
     date_range_start / date_range_end: ISO dates (YYYY-MM-DD) or relative
@@ -2640,14 +2640,12 @@ def confirm_and_apply(
     to make real changes to the ad account (Google Ads or Reddit Ads — the
     plan knows which platform it targets).
 
-    Config override: if 'safety.require_dry_run: true' is set in the user's
-    config file (default ~/.adloop/config.yaml), dry_run=false is IGNORED
-    and this tool will keep returning DRY_RUN_SUCCESS. When that happens the
-    response includes 'dry_run_forced_by', 'config_path', and 'remediation'
-    fields — surface those to the user verbatim and STOP retrying. Calling
-    this tool again with dry_run=false will not change anything until the
-    user edits the config file, sets 'require_dry_run: false', and restarts
-    the AdLoop MCP server.
+    Forced dry runs: when real changes are switched off (live changes off
+    for the workspace in AdLoop Cloud, or safety.require_dry_run in a
+    self-hosted config), dry_run=false is IGNORED and the result is still
+    DRY_RUN_SUCCESS, with 'dry_run_forced_by' and 'remediation' fields.
+    Pass the remediation on to the user and stop retrying: calling again
+    with dry_run=false changes nothing until that setting is changed.
 
     Two-phase apply: if 'safety.two_phase_apply: true' is set (always on
     for AdLoop Cloud tenants), dry_run=false is REFUSED with status

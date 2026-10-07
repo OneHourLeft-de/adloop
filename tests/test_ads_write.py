@@ -1931,6 +1931,35 @@ class TestConfirmAndApplyDryRunOverride:
         assert "IGNORED" in result["message"]
         assert "restart" in result["message"].lower()
 
+    def test_forced_dry_run_on_a_hosted_server_points_at_the_dashboard(self, tmp_path):
+        """Hosted workspaces have no config file and no server to restart:
+        live changes are a dashboard setting."""
+        from adloop import runtime
+
+        config = AdLoopConfig(
+            ads=AdsConfig(customer_id="123-456-7890"),
+            safety=SafetyConfig(
+                require_dry_run=True,
+                log_file=str(tmp_path / "audit.log"),
+            ),
+        )
+        plan_id = self._stage_plan()
+
+        runtime.set_deployment_mode("server")
+        try:
+            result = write.confirm_and_apply(config, plan_id=plan_id, dry_run=False)
+        finally:
+            runtime.set_deployment_mode("local")
+
+        assert result["status"] == "DRY_RUN_SUCCESS"
+        assert result["dry_run_forced_by"] == "config.safety.require_dry_run"
+        assert "config_path" not in result
+        assert "Settings → Safety" in result["remediation"]
+        for text in (result["remediation"], result["message"]):
+            assert "config.yaml" not in text
+            assert "restart" not in text.lower()
+        assert "IGNORED" in result["message"]
+
     def test_requested_dry_run_does_not_mention_config_override(self, tmp_path):
         """When the caller intentionally asked for a dry run, the response
         should NOT mislead them by claiming a config override happened."""

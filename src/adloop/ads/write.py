@@ -2780,7 +2780,27 @@ def confirm_and_apply(
                     "objects an earlier step would create, so Google could "
                     "only validate the step(s) before them."
                 )
-        if forced_by_config:
+        from adloop.runtime import deployment_mode as _deployment_mode
+
+        if forced_by_config and _deployment_mode() == "server":
+            # Hosted: the flag is the workspace's live-changes setting,
+            # switched in the dashboard. There is no config file to edit
+            # and no server for the user to restart.
+            response["dry_run_forced_by"] = "config.safety.require_dry_run"
+            response["remediation"] = (
+                "Live changes are switched off for this workspace (or for "
+                "this client). The workspace owner can switch them on in "
+                "the AdLoop Cloud dashboard under Settings → Safety. Passing "
+                "dry_run=false on this tool will keep being overridden until "
+                "then."
+            )
+            response["message"] = (
+                "dry_run=false was IGNORED because live changes are switched "
+                "off for this workspace. No changes were made. Retrying this "
+                "tool with dry_run=false will not succeed until live changes "
+                "are switched on in the dashboard."
+            )
+        elif forced_by_config:
             # The caller passed dry_run=false but safety.require_dry_run
             # forced it back on. Tell them exactly why and how to unlock
             # real writes — without this, agents (e.g. Claude Code) retry
