@@ -448,6 +448,8 @@ class TestDirectoryReadiness:
             ann = tool.annotations
             assert tool.title, tool.name
             assert ann is not None, tool.name
+            # Claude's connector portal reads the title from the annotations.
+            assert ann.title == tool.title, tool.name
             assert ann.read_only_hint is not None, tool.name
             assert ann.destructive_hint is not None, tool.name
             assert ann.open_world_hint is True, tool.name

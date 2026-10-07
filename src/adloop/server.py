@@ -166,6 +166,20 @@ mcp = FastMCP(
 )
 
 
+def _tool(*, title: str, annotations: ToolAnnotations, **kwargs):
+    """Register a tool with its title in both places MCP defines one.
+
+    The tool's own ``title`` is what clients display; ``annotations.title``
+    is what directory reviews (Claude's connector portal) check. One title,
+    copied into the shared annotation preset, keeps them from drifting.
+    """
+    return mcp.tool(
+        title=title,
+        annotations=annotations.model_copy(update={"title": title}),
+        **kwargs,
+    )
+
+
 def _reddit_structured_error(exc: Exception) -> dict | None:
     """Reddit-specific translations; keyed on exception type so Reddit's
     ``invalid_grant`` never gets the "Reconnect Google" hint below."""
@@ -400,7 +414,7 @@ def _safe(fn: Callable) -> Callable:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(title="Connection health check", annotations=_READONLY, tags={"core"})
+@_tool(title="Connection health check", annotations=_READONLY, tags={"core"})
 @_safe
 def health_check() -> dict:
     """Test AdLoop connectivity — checks OAuth token, GA4 API, Google Ads API,
@@ -531,7 +545,7 @@ def health_check() -> dict:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(title="List Analytics properties", annotations=_READONLY, tags={"ga4"})
+@_tool(title="List Analytics properties", annotations=_READONLY, tags={"ga4"})
 @_safe
 def get_account_summaries() -> dict:
     """List all GA4 accounts and properties accessible by the authenticated user.
@@ -544,7 +558,7 @@ def get_account_summaries() -> dict:
     return _impl(current_config())
 
 
-@mcp.tool(title="Analytics report", annotations=_READONLY, tags={"ga4"})
+@_tool(title="Analytics report", annotations=_READONLY, tags={"ga4"})
 @_safe
 def run_ga4_report(
     dimensions: _StrListOpt = None,
@@ -577,7 +591,7 @@ def run_ga4_report(
     )
 
 
-@mcp.tool(title="Analytics realtime report", annotations=_READONLY, tags={"ga4"})
+@_tool(title="Analytics realtime report", annotations=_READONLY, tags={"ga4"})
 @_safe
 def run_realtime_report(
     dimensions: _StrListOpt = None,
@@ -600,7 +614,7 @@ def run_realtime_report(
     )
 
 
-@mcp.tool(title="List Analytics events", annotations=_READONLY, tags={"ga4"})
+@_tool(title="List Analytics events", annotations=_READONLY, tags={"ga4"})
 @_safe
 def get_tracking_events(
     date_range_start: str = "28daysAgo",
@@ -627,7 +641,7 @@ def get_tracking_events(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(title="List Search Console properties", annotations=_READONLY, tags={"gsc"})
+@_tool(title="List Search Console properties", annotations=_READONLY, tags={"gsc"})
 @_safe
 def list_gsc_sites() -> dict:
     """List all Google Search Console properties the authenticated user can access.
@@ -641,7 +655,7 @@ def list_gsc_sites() -> dict:
     return _impl(current_config())
 
 
-@mcp.tool(title="Search Console report", annotations=_READONLY, tags={"gsc"})
+@_tool(title="Search Console report", annotations=_READONLY, tags={"gsc"})
 @_safe
 def run_gsc_report(
     site_url: str = "",
@@ -693,7 +707,7 @@ def run_gsc_report(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(title="PageSpeed analysis", annotations=_READONLY, tags={"web"})
+@_tool(title="PageSpeed analysis", annotations=_READONLY, tags={"web"})
 @_safe
 def analyze_page_speed(url: str, strategy: str = "mobile") -> dict:
     """Run PageSpeed Insights for a landing page — Lighthouse + real-user data.
@@ -712,7 +726,7 @@ def analyze_page_speed(url: str, strategy: str = "mobile") -> dict:
     return _impl(current_config(), url=url, strategy=strategy)
 
 
-@mcp.tool(
+@_tool(
     title="List Merchant Center accounts",
     annotations=_READONLY,
     tags={"merchant"},
@@ -730,7 +744,7 @@ def list_merchant_accounts() -> dict:
     return _impl(current_config())
 
 
-@mcp.tool(title="Merchant Center feed health", annotations=_READONLY, tags={"merchant"})
+@_tool(title="Merchant Center feed health", annotations=_READONLY, tags={"merchant"})
 @_safe
 def get_merchant_feed_health(account_id: str = "") -> dict:
     """Merchant Center feed health — disapproved products + account issues.
@@ -750,7 +764,7 @@ def get_merchant_feed_health(account_id: str = "") -> dict:
     return _impl(current_config(), account_id=account_id)
 
 
-@mcp.tool(title="List Google Ads accounts", annotations=_READONLY, tags={"ads"})
+@_tool(title="List Google Ads accounts", annotations=_READONLY, tags={"ads"})
 @_safe
 def list_accounts(limit: int = 200) -> dict:
     """List accessible Google Ads accounts.
@@ -769,7 +783,7 @@ def list_accounts(limit: int = 200) -> dict:
     return _impl(current_config(), limit=limit)
 
 
-@mcp.tool(title="Campaign performance", annotations=_READONLY, tags={"ads"})
+@_tool(title="Campaign performance", annotations=_READONLY, tags={"ads"})
 @_safe
 def get_campaign_performance(
     customer_id: str = "",
@@ -798,7 +812,7 @@ def get_campaign_performance(
     )
 
 
-@mcp.tool(title="Ad performance", annotations=_READONLY, tags={"ads"})
+@_tool(title="Ad performance", annotations=_READONLY, tags={"ads"})
 @_safe
 def get_ad_performance(
     customer_id: str = "",
@@ -826,7 +840,7 @@ def get_ad_performance(
     )
 
 
-@mcp.tool(title="Keyword performance", annotations=_READONLY, tags={"ads"})
+@_tool(title="Keyword performance", annotations=_READONLY, tags={"ads"})
 @_safe
 def get_keyword_performance(
     customer_id: str = "",
@@ -854,7 +868,7 @@ def get_keyword_performance(
     )
 
 
-@mcp.tool(title="Search terms report", annotations=_READONLY, tags={"ads"})
+@_tool(title="Search terms report", annotations=_READONLY, tags={"ads"})
 @_safe
 def get_search_terms(
     customer_id: str = "",
@@ -882,7 +896,7 @@ def get_search_terms(
     )
 
 
-@mcp.tool(title="List negative keywords", annotations=_READONLY, tags={"ads"})
+@_tool(title="List negative keywords", annotations=_READONLY, tags={"ads"})
 @_safe
 def get_negative_keywords(
     customer_id: str = "",
@@ -902,7 +916,7 @@ def get_negative_keywords(
     )
 
 
-@mcp.tool(
+@_tool(
     title="List shared negative keyword lists",
     annotations=_READONLY,
     tags={"ads"},
@@ -922,7 +936,7 @@ def get_negative_keyword_lists(
     return _impl(current_config(), customer_id=customer_id or current_config().ads.customer_id)
 
 
-@mcp.tool(
+@_tool(
     title="Keywords in a negative keyword list",
     annotations=_READONLY,
     tags={"ads"},
@@ -945,7 +959,7 @@ def get_negative_keyword_list_keywords(
     )
 
 
-@mcp.tool(
+@_tool(
     title="Campaigns using a negative keyword list",
     annotations=_READONLY,
     tags={"ads"},
@@ -974,7 +988,7 @@ def get_negative_keyword_list_campaigns(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(title="Google Ads recommendations", annotations=_READONLY, tags={"ads"})
+@_tool(title="Google Ads recommendations", annotations=_READONLY, tags={"ads"})
 @_safe
 def get_recommendations(
     customer_id: str = "",
@@ -1003,7 +1017,7 @@ def get_recommendations(
     )
 
 
-@mcp.tool(title="Performance Max performance", annotations=_READONLY, tags={"ads"})
+@_tool(title="Performance Max performance", annotations=_READONLY, tags={"ads"})
 @_safe
 def get_pmax_performance(
     customer_id: str = "",
@@ -1034,7 +1048,7 @@ def get_pmax_performance(
     )
 
 
-@mcp.tool(
+@_tool(
     title="Performance Max asset performance",
     annotations=_READONLY,
     tags={"ads"},
@@ -1067,7 +1081,7 @@ def get_asset_performance(
     )
 
 
-@mcp.tool(
+@_tool(
     title="Performance Max asset combinations",
     annotations=_READONLY,
     tags={"ads"},
@@ -1094,7 +1108,7 @@ def get_detailed_asset_performance(
     )
 
 
-@mcp.tool(title="Audience performance", annotations=_READONLY, tags={"ads"})
+@_tool(title="Audience performance", annotations=_READONLY, tags={"ads"})
 @_safe
 def get_audience_performance(
     customer_id: str = "",
@@ -1125,7 +1139,7 @@ def get_audience_performance(
     )
 
 
-@mcp.tool(title="Demographic targeting", annotations=_READONLY, tags={"ads"})
+@_tool(title="Demographic targeting", annotations=_READONLY, tags={"ads"})
 @_safe
 def get_demographic_targeting(
     ad_group_id: str = "",
@@ -1158,7 +1172,7 @@ def get_demographic_targeting(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(
+@_tool(
     title="Campaign conversions against Analytics",
     annotations=_READONLY,
     tags={"tracking"},
@@ -1192,7 +1206,7 @@ def analyze_campaign_conversions(
     )
 
 
-@mcp.tool(title="Landing page analysis", annotations=_READONLY, tags={"tracking"})
+@_tool(title="Landing page analysis", annotations=_READONLY, tags={"tracking"})
 @_safe
 def landing_page_analysis(
     date_range_start: str = "",
@@ -1218,7 +1232,7 @@ def landing_page_analysis(
     )
 
 
-@mcp.tool(title="Attribution check", annotations=_READONLY, tags={"tracking"})
+@_tool(title="Attribution check", annotations=_READONLY, tags={"tracking"})
 @_safe
 def attribution_check(
     date_range_start: str = "",
@@ -1249,7 +1263,7 @@ def attribution_check(
     )
 
 
-@mcp.tool(title="Tracking coverage audit", annotations=_READONLY, tags={"gtm"})
+@_tool(title="Tracking coverage audit", annotations=_READONLY, tags={"gtm"})
 @_safe
 def audit_event_coverage(
     expected_events: list[str],
@@ -1302,7 +1316,7 @@ def audit_event_coverage(
     )
 
 
-@mcp.tool(title="List Tag Manager accounts", annotations=_READONLY, tags={"gtm"})
+@_tool(title="List Tag Manager accounts", annotations=_READONLY, tags={"gtm"})
 @_safe
 def list_gtm_accounts() -> dict:
     """List all GTM accounts the AdLoop service account / OAuth user can read.
@@ -1317,7 +1331,7 @@ def list_gtm_accounts() -> dict:
     return _impl(current_config())
 
 
-@mcp.tool(title="List Tag Manager containers", annotations=_READONLY, tags={"gtm"})
+@_tool(title="List Tag Manager containers", annotations=_READONLY, tags={"gtm"})
 @_safe
 def list_gtm_containers(gtm_account_id: str = "") -> dict:
     """List all containers under a GTM account.
@@ -1337,7 +1351,7 @@ def list_gtm_containers(gtm_account_id: str = "") -> dict:
     return _impl(current_config(), account_id=gtm_account_id)
 
 
-@mcp.tool(title="List Tag Manager tags", annotations=_READONLY, tags={"gtm"})
+@_tool(title="List Tag Manager tags", annotations=_READONLY, tags={"gtm"})
 @_safe
 def list_gtm_tags(gtm_account_id: str = "", gtm_container_id: str = "") -> dict:
     """List every tag in the LIVE GTM container.
@@ -1357,7 +1371,7 @@ def list_gtm_tags(gtm_account_id: str = "", gtm_container_id: str = "") -> dict:
     )
 
 
-@mcp.tool(title="Tag Manager tag details", annotations=_READONLY, tags={"gtm"})
+@_tool(title="Tag Manager tag details", annotations=_READONLY, tags={"gtm"})
 @_safe
 def get_gtm_tag(
     tag_id: str, gtm_account_id: str = "", gtm_container_id: str = ""
@@ -1382,7 +1396,7 @@ def get_gtm_tag(
     )
 
 
-@mcp.tool(title="List Tag Manager triggers", annotations=_READONLY, tags={"gtm"})
+@_tool(title="List Tag Manager triggers", annotations=_READONLY, tags={"gtm"})
 @_safe
 def list_gtm_triggers(gtm_account_id: str = "", gtm_container_id: str = "") -> dict:
     """List every trigger in the LIVE GTM container.
@@ -1402,7 +1416,7 @@ def list_gtm_triggers(gtm_account_id: str = "", gtm_container_id: str = "") -> d
     )
 
 
-@mcp.tool(title="Tag Manager trigger details", annotations=_READONLY, tags={"gtm"})
+@_tool(title="Tag Manager trigger details", annotations=_READONLY, tags={"gtm"})
 @_safe
 def get_gtm_trigger(
     trigger_id: str, gtm_account_id: str = "", gtm_container_id: str = ""
@@ -1427,7 +1441,7 @@ def get_gtm_trigger(
     )
 
 
-@mcp.tool(title="List Tag Manager variables", annotations=_READONLY, tags={"gtm"})
+@_tool(title="List Tag Manager variables", annotations=_READONLY, tags={"gtm"})
 @_safe
 def list_gtm_variables(gtm_account_id: str = "", gtm_container_id: str = "") -> dict:
     """List GTM variables — both custom and enabled built-in.
@@ -1449,7 +1463,7 @@ def list_gtm_variables(gtm_account_id: str = "", gtm_container_id: str = "") -> 
     )
 
 
-@mcp.tool(title="List Tag Manager workspaces", annotations=_READONLY, tags={"gtm"})
+@_tool(title="List Tag Manager workspaces", annotations=_READONLY, tags={"gtm"})
 @_safe
 def list_gtm_workspaces(gtm_account_id: str = "", gtm_container_id: str = "") -> dict:
     """List workspaces (drafts) under a GTM container.
@@ -1469,7 +1483,7 @@ def list_gtm_workspaces(gtm_account_id: str = "", gtm_container_id: str = "") ->
     )
 
 
-@mcp.tool(title="Tag Manager workspace changes", annotations=_READONLY, tags={"gtm"})
+@_tool(title="Tag Manager workspace changes", annotations=_READONLY, tags={"gtm"})
 @_safe
 def get_gtm_workspace_diff(
     workspace_id: str, gtm_account_id: str = "", gtm_container_id: str = ""
@@ -1496,7 +1510,7 @@ def get_gtm_workspace_diff(
     )
 
 
-@mcp.tool(title="Tag Manager version history", annotations=_READONLY, tags={"gtm"})
+@_tool(title="Tag Manager version history", annotations=_READONLY, tags={"gtm"})
 @_safe
 def list_gtm_versions(
     gtm_account_id: str = "", gtm_container_id: str = "", page_size: int = 50
@@ -1522,7 +1536,7 @@ def list_gtm_versions(
     )
 
 
-@mcp.tool(title="Tag Manager version details", annotations=_READONLY, tags={"gtm"})
+@_tool(title="Tag Manager version details", annotations=_READONLY, tags={"gtm"})
 @_safe
 def get_gtm_version(
     container_version_id: str, gtm_account_id: str = "", gtm_container_id: str = ""
@@ -1547,7 +1561,7 @@ def get_gtm_version(
     )
 
 
-@mcp.tool(title="Custom Google Ads query", annotations=_READONLY, tags={"ads"})
+@_tool(title="Custom Google Ads query", annotations=_READONLY, tags={"ads"})
 @_safe
 def run_gaql(
     query: str,
@@ -1577,7 +1591,7 @@ def run_gaql(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(title="Draft a campaign", annotations=_WRITE, tags={"ads"})
+@_tool(title="Draft a campaign", annotations=_WRITE, tags={"ads"})
 @_safe
 def draft_campaign(
     campaign_name: str,
@@ -1644,7 +1658,7 @@ def draft_campaign(
     )
 
 
-@mcp.tool(title="Draft an ad group", annotations=_WRITE, tags={"ads"})
+@_tool(title="Draft an ad group", annotations=_WRITE, tags={"ads"})
 @_safe
 def draft_ad_group(
     campaign_id: str,
@@ -1677,7 +1691,7 @@ def draft_ad_group(
     )
 
 
-@mcp.tool(title="Draft campaign changes", annotations=_WRITE, tags={"ads"})
+@_tool(title="Draft campaign changes", annotations=_WRITE, tags={"ads"})
 @_safe
 def update_campaign(
     campaign_id: str,
@@ -1734,7 +1748,7 @@ def update_campaign(
     )
 
 
-@mcp.tool(title="Draft a responsive search ad", annotations=_WRITE, tags={"ads"})
+@_tool(title="Draft a responsive search ad", annotations=_WRITE, tags={"ads"})
 @_safe
 def draft_responsive_search_ad(
     ad_group_id: str,
@@ -1777,7 +1791,7 @@ def draft_responsive_search_ad(
     )
 
 
-@mcp.tool(title="Update a responsive search ad", annotations=_WRITE, tags={"ads"})
+@_tool(title="Update a responsive search ad", annotations=_WRITE, tags={"ads"})
 @_safe
 def update_responsive_search_ad(
     ad_id: str,
@@ -1836,7 +1850,7 @@ def update_responsive_search_ad(
     )
 
 
-@mcp.tool(title="Draft keywords", annotations=_WRITE, tags={"ads"})
+@_tool(title="Draft keywords", annotations=_WRITE, tags={"ads"})
 @_safe
 def draft_keywords(
     ad_group_id: str,
@@ -1858,7 +1872,7 @@ def draft_keywords(
     )
 
 
-@mcp.tool(title="Custom conversion goals", annotations=_READONLY, tags={"ads"})
+@_tool(title="Custom conversion goals", annotations=_READONLY, tags={"ads"})
 @_safe
 def get_custom_conversion_goals(
     campaign_id: str = "",
@@ -1887,7 +1901,7 @@ def get_custom_conversion_goals(
     )
 
 
-@mcp.tool(
+@_tool(
     title="Draft a custom conversion goal",
     annotations=_WRITE,
     tags={"ads"},
@@ -1931,7 +1945,7 @@ def draft_custom_conversion_goal(
     )
 
 
-@mcp.tool(
+@_tool(
     title="Draft changes to a custom conversion goal",
     annotations=_WRITE,
     tags={"ads"},
@@ -1969,7 +1983,7 @@ def draft_update_custom_conversion_goal(
     )
 
 
-@mcp.tool(
+@_tool(
     title="Draft assigning a custom conversion goal",
     annotations=_WRITE,
     tags={"ads"},
@@ -2012,7 +2026,7 @@ def draft_assign_custom_conversion_goal(
     )
 
 
-@mcp.tool(
+@_tool(
     title="Draft clearing a custom conversion goal",
     annotations=_WRITE,
     tags={"ads"},
@@ -2043,7 +2057,7 @@ def draft_clear_custom_conversion_goal(
     )
 
 
-@mcp.tool(title="Draft negative keywords", annotations=_WRITE, tags={"ads"})
+@_tool(title="Draft negative keywords", annotations=_WRITE, tags={"ads"})
 @_safe
 def add_negative_keywords(
     campaign_id: str,
@@ -2068,7 +2082,7 @@ def add_negative_keywords(
     )
 
 
-@mcp.tool(title="Draft negative locations", annotations=_WRITE, tags={"ads"})
+@_tool(title="Draft negative locations", annotations=_WRITE, tags={"ads"})
 @_safe
 def add_negative_locations(
     campaign_id: str,
@@ -2092,7 +2106,7 @@ def add_negative_locations(
     )
 
 
-@mcp.tool(
+@_tool(
     title="Draft a shared negative keyword list",
     annotations=_WRITE,
     tags={"ads"},
@@ -2124,7 +2138,7 @@ def propose_negative_keyword_list(
     )
 
 
-@mcp.tool(
+@_tool(
     title="Draft additions to a negative keyword list",
     annotations=_WRITE,
     tags={"ads"},
@@ -2161,7 +2175,7 @@ def add_to_negative_keyword_list(
     )
 
 
-@mcp.tool(title="Draft attaching a shared set", annotations=_WRITE, tags={"ads"})
+@_tool(title="Draft attaching a shared set", annotations=_WRITE, tags={"ads"})
 @_safe
 def attach_shared_set_to_campaigns(
     shared_set_id: str,
@@ -2192,7 +2206,7 @@ def attach_shared_set_to_campaigns(
     )
 
 
-@mcp.tool(title="Draft detaching a shared set", annotations=_WRITE, tags={"ads"})
+@_tool(title="Draft detaching a shared set", annotations=_WRITE, tags={"ads"})
 @_safe
 def detach_shared_set_from_campaigns(
     shared_set_id: str,
@@ -2223,7 +2237,7 @@ def detach_shared_set_from_campaigns(
     )
 
 
-@mcp.tool(title="AI Max settings", annotations=_READONLY, tags={"ads"})
+@_tool(title="AI Max settings", annotations=_READONLY, tags={"ads"})
 @_safe
 def get_ai_max_settings(
     campaign_id: str = "",
@@ -2253,7 +2267,7 @@ def get_ai_max_settings(
         campaign_id=campaign_id,
     )
 
-@mcp.tool(title="Draft AI Max settings", annotations=_WRITE, tags={"ads"})
+@_tool(title="Draft AI Max settings", annotations=_WRITE, tags={"ads"})
 @_safe
 def draft_ai_max_settings(
     campaign_id: str,
@@ -2318,7 +2332,7 @@ def draft_ai_max_settings(
     )
 
 
-@mcp.tool(
+@_tool(
     title="Prepare a campaign for brand exclusions",
     annotations=_WRITE,
     tags={"ads"},
@@ -2361,7 +2375,7 @@ def draft_prepare_brand_exclusions(
         include_paused_ad_groups=include_paused_ad_groups,
     )
 
-@mcp.tool(title="Draft demographic targeting", annotations=_WRITE, tags={"ads"})
+@_tool(title="Draft demographic targeting", annotations=_WRITE, tags={"ads"})
 @_safe
 def draft_demographic_targeting(
     customer_id: str = "",
@@ -2413,7 +2427,7 @@ def draft_demographic_targeting(
     )
 
 
-@mcp.tool(title="Draft ad group changes", annotations=_WRITE, tags={"ads"})
+@_tool(title="Draft ad group changes", annotations=_WRITE, tags={"ads"})
 @_safe
 def update_ad_group(
     ad_group_id: str,
@@ -2433,7 +2447,7 @@ def update_ad_group(
     )
 
 
-@mcp.tool(title="Draft callouts", annotations=_WRITE, tags={"ads"})
+@_tool(title="Draft callouts", annotations=_WRITE, tags={"ads"})
 @_safe
 def draft_callouts(
     campaign_id: str,
@@ -2451,7 +2465,7 @@ def draft_callouts(
     )
 
 
-@mcp.tool(title="Draft structured snippets", annotations=_WRITE, tags={"ads"})
+@_tool(title="Draft structured snippets", annotations=_WRITE, tags={"ads"})
 @_safe
 def draft_structured_snippets(
     campaign_id: str,
@@ -2469,7 +2483,7 @@ def draft_structured_snippets(
     )
 
 
-@mcp.tool(title="Draft image assets", annotations=_WRITE, tags={"ads"})
+@_tool(title="Draft image assets", annotations=_WRITE, tags={"ads"})
 @_safe
 def draft_image_assets(
     campaign_id: str,
@@ -2503,7 +2517,7 @@ def draft_image_assets(
     )
 
 
-@mcp.tool(title="Draft pausing an entity", annotations=_WRITE, tags={"ads"})
+@_tool(title="Draft pausing an entity", annotations=_WRITE, tags={"ads"})
 @_safe
 def pause_entity(
     entity_type: str,
@@ -2531,7 +2545,7 @@ def pause_entity(
     )
 
 
-@mcp.tool(title="Draft enabling an entity", annotations=_WRITE, tags={"ads"})
+@_tool(title="Draft enabling an entity", annotations=_WRITE, tags={"ads"})
 @_safe
 def enable_entity(
     entity_type: str,
@@ -2559,7 +2573,7 @@ def enable_entity(
     )
 
 
-@mcp.tool(title="Draft removing an entity", annotations=_DESTRUCTIVE, tags={"ads"})
+@_tool(title="Draft removing an entity", annotations=_DESTRUCTIVE, tags={"ads"})
 @_safe
 def remove_entity(
     entity_type: str,
@@ -2595,7 +2609,7 @@ def remove_entity(
     )
 
 
-@mcp.tool(title="Draft sitelinks", annotations=_WRITE, tags={"ads"})
+@_tool(title="Draft sitelinks", annotations=_WRITE, tags={"ads"})
 @_safe
 def draft_sitelinks(
     campaign_id: str,
@@ -2628,7 +2642,7 @@ def draft_sitelinks(
     )
 
 
-@mcp.tool(title="Apply a previewed change", annotations=_DESTRUCTIVE, tags={"core"})
+@_tool(title="Apply a previewed change", annotations=_DESTRUCTIVE, tags={"core"})
 @_safe
 def confirm_and_apply(
     plan_id: str,
@@ -2681,7 +2695,7 @@ def _reddit_account(ad_account_id: str) -> str:
     return ad_account_id or current_config().reddit.ad_account_id
 
 
-@mcp.tool(title="List Reddit ad accounts", annotations=_READONLY, tags={"reddit"})
+@_tool(title="List Reddit ad accounts", annotations=_READONLY, tags={"reddit"})
 @_safe
 def list_reddit_accounts() -> dict:
     """List Reddit businesses and ad accounts the connected Reddit user can access.
@@ -2695,7 +2709,7 @@ def list_reddit_accounts() -> dict:
     return _impl(current_config())
 
 
-@mcp.tool(
+@_tool(
     title="Reddit billing + posting profiles", annotations=_READONLY, tags={"reddit"}
 )
 @_safe
@@ -2710,7 +2724,7 @@ def list_reddit_funding_instruments(ad_account_id: str = "") -> dict:
     return _impl(current_config(), ad_account_id=_reddit_account(ad_account_id))
 
 
-@mcp.tool(title="Reddit campaigns", annotations=_READONLY, tags={"reddit"})
+@_tool(title="Reddit campaigns", annotations=_READONLY, tags={"reddit"})
 @_safe
 def get_reddit_campaigns(ad_account_id: str = "", include_archived: bool = False) -> dict:
     """List Reddit campaigns with status, objective, budget mode and bids.
@@ -2729,7 +2743,7 @@ def get_reddit_campaigns(ad_account_id: str = "", include_archived: bool = False
     )
 
 
-@mcp.tool(title="Reddit ad groups", annotations=_READONLY, tags={"reddit"})
+@_tool(title="Reddit ad groups", annotations=_READONLY, tags={"reddit"})
 @_safe
 def get_reddit_ad_groups(ad_account_id: str = "", campaign_id: str = "") -> dict:
     """List Reddit ad groups (budget, bid, pixel, weekly schedule, targeting summary), optionally per campaign.
@@ -2746,7 +2760,7 @@ def get_reddit_ad_groups(ad_account_id: str = "", campaign_id: str = "") -> dict
     )
 
 
-@mcp.tool(title="Reddit ads", annotations=_READONLY, tags={"reddit"})
+@_tool(title="Reddit ads", annotations=_READONLY, tags={"reddit"})
 @_safe
 def get_reddit_ads(
     ad_account_id: str = "",
@@ -2772,7 +2786,7 @@ def get_reddit_ads(
     )
 
 
-@mcp.tool(title="Reddit performance", annotations=_READONLY, tags={"reddit"})
+@_tool(title="Reddit performance", annotations=_READONLY, tags={"reddit"})
 @_safe
 def get_reddit_performance(
     ad_account_id: str = "",
@@ -2808,7 +2822,7 @@ def get_reddit_performance(
     )
 
 
-@mcp.tool(title="Raw Reddit report", annotations=_READONLY, tags={"reddit"})
+@_tool(title="Raw Reddit report", annotations=_READONLY, tags={"reddit"})
 @_safe
 def run_reddit_report(
     fields: _StrList,
@@ -2844,7 +2858,7 @@ def run_reddit_report(
     )
 
 
-@mcp.tool(title="Reddit pixels", annotations=_READONLY, tags={"reddit"})
+@_tool(title="Reddit pixels", annotations=_READONLY, tags={"reddit"})
 @_safe
 def get_reddit_pixels(ad_account_id: str = "") -> dict:
     """Reddit pixels of the account and when each event (purchase, sign_up, lead, ...) last fired.
@@ -2858,7 +2872,7 @@ def get_reddit_pixels(ad_account_id: str = "") -> dict:
     return _impl(current_config(), ad_account_id=_reddit_account(ad_account_id))
 
 
-@mcp.tool(title="Search Reddit targeting", annotations=_READONLY, tags={"reddit"})
+@_tool(title="Search Reddit targeting", annotations=_READONLY, tags={"reddit"})
 @_safe
 def search_reddit_targeting(
     kind: str, query: str = "", country: str = "", website_url: str = "", limit: int = 25
@@ -2880,7 +2894,7 @@ def search_reddit_targeting(
     )
 
 
-@mcp.tool(title="Reddit account change history", annotations=_READONLY, tags={"reddit"})
+@_tool(title="Reddit account change history", annotations=_READONLY, tags={"reddit"})
 @_safe
 def get_reddit_account_history(
     ad_account_id: str = "",
@@ -2911,7 +2925,7 @@ def get_reddit_account_history(
     )
 
 
-@mcp.tool(title="Estimate a Reddit ad group", annotations=_READONLY, tags={"reddit"})
+@_tool(title="Estimate a Reddit ad group", annotations=_READONLY, tags={"reddit"})
 @_safe
 def estimate_reddit_ad_group(
     daily_budget: float | None = None,
@@ -2971,7 +2985,7 @@ def estimate_reddit_ad_group(
     )
 
 
-@mcp.tool(title="Draft pausing a Reddit entity", annotations=_WRITE, tags={"reddit"})
+@_tool(title="Draft pausing a Reddit entity", annotations=_WRITE, tags={"reddit"})
 @_safe
 def pause_reddit_entity(
     entity_type: str, entity_id: str, ad_account_id: str = ""
@@ -2991,7 +3005,7 @@ def pause_reddit_entity(
     )
 
 
-@mcp.tool(title="Draft enabling a Reddit entity", annotations=_WRITE, tags={"reddit"})
+@_tool(title="Draft enabling a Reddit entity", annotations=_WRITE, tags={"reddit"})
 @_safe
 def enable_reddit_entity(
     entity_type: str, entity_id: str, ad_account_id: str = ""
@@ -3011,7 +3025,7 @@ def enable_reddit_entity(
     )
 
 
-@mcp.tool(title="Draft archiving a Reddit entity", annotations=_DESTRUCTIVE, tags={"reddit"})
+@_tool(title="Draft archiving a Reddit entity", annotations=_DESTRUCTIVE, tags={"reddit"})
 @_safe
 def remove_reddit_entity(
     entity_type: str, entity_id: str, ad_account_id: str = ""
@@ -3032,7 +3046,7 @@ def remove_reddit_entity(
     )
 
 
-@mcp.tool(title="Draft Reddit campaign changes", annotations=_WRITE, tags={"reddit"})
+@_tool(title="Draft Reddit campaign changes", annotations=_WRITE, tags={"reddit"})
 @_safe
 def update_reddit_campaign(
     campaign_id: str,
@@ -3080,7 +3094,7 @@ def update_reddit_campaign(
     )
 
 
-@mcp.tool(title="Draft Reddit ad group changes", annotations=_WRITE, tags={"reddit"})
+@_tool(title="Draft Reddit ad group changes", annotations=_WRITE, tags={"reddit"})
 @_safe
 def update_reddit_ad_group(
     ad_group_id: str,
@@ -3151,7 +3165,7 @@ def update_reddit_ad_group(
     )
 
 
-@mcp.tool(title="Draft Reddit ad changes", annotations=_WRITE, tags={"reddit"})
+@_tool(title="Draft Reddit ad changes", annotations=_WRITE, tags={"reddit"})
 @_safe
 def update_reddit_ad(
     ad_id: str,
@@ -3178,7 +3192,7 @@ def update_reddit_ad(
     )
 
 
-@mcp.tool(title="Draft a Reddit campaign", annotations=_WRITE, tags={"reddit"})
+@_tool(title="Draft a Reddit campaign", annotations=_WRITE, tags={"reddit"})
 @_safe
 def draft_reddit_campaign(
     campaign_name: str,
@@ -3237,7 +3251,7 @@ def draft_reddit_campaign(
     )
 
 
-@mcp.tool(title="Draft a Reddit ad group", annotations=_WRITE, tags={"reddit"})
+@_tool(title="Draft a Reddit ad group", annotations=_WRITE, tags={"reddit"})
 @_safe
 def draft_reddit_ad_group(
     campaign_id: str,
@@ -3318,7 +3332,7 @@ def draft_reddit_ad_group(
     )
 
 
-@mcp.tool(title="Draft a Reddit ad", annotations=_WRITE, tags={"reddit"})
+@_tool(title="Draft a Reddit ad", annotations=_WRITE, tags={"reddit"})
 @_safe
 def draft_reddit_ad(
     ad_group_id: str,
@@ -3374,7 +3388,7 @@ def draft_reddit_ad(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(title="Draft an Analytics key event", annotations=_WRITE, tags={"ga4"})
+@_tool(title="Draft an Analytics key event", annotations=_WRITE, tags={"ga4"})
 @_safe
 def draft_key_event(
     event_name: str,
@@ -3399,7 +3413,7 @@ def draft_key_event(
     )
 
 
-@mcp.tool(title="Draft a conversion action", annotations=_WRITE, tags={"ads"})
+@_tool(title="Draft a conversion action", annotations=_WRITE, tags={"ads"})
 @_safe
 def draft_create_conversion_action(
     name: str,
@@ -3452,7 +3466,7 @@ def draft_create_conversion_action(
     )
 
 
-@mcp.tool(title="Draft conversion action changes", annotations=_WRITE, tags={"ads"})
+@_tool(title="Draft conversion action changes", annotations=_WRITE, tags={"ads"})
 @_safe
 def draft_update_conversion_action(
     conversion_action_id: str,
@@ -3499,7 +3513,7 @@ def draft_update_conversion_action(
     )
 
 
-@mcp.tool(title="Draft removing a conversion action", annotations=_WRITE, tags={"ads"})
+@_tool(title="Draft removing a conversion action", annotations=_WRITE, tags={"ads"})
 @_safe
 def draft_remove_conversion_action(
     conversion_action_id: str,
@@ -3523,7 +3537,7 @@ def draft_remove_conversion_action(
     )
 
 
-@mcp.tool(title="Validate tracking", annotations=_READONLY, tags={"tracking"})
+@_tool(title="Validate tracking", annotations=_READONLY, tags={"tracking"})
 @_safe
 def validate_tracking(
     expected_events: _StrList,
@@ -3551,7 +3565,7 @@ def validate_tracking(
     )
 
 
-@mcp.tool(title="Generate tracking code", annotations=_READONLY, tags={"tracking"})
+@_tool(title="Generate tracking code", annotations=_READONLY, tags={"tracking"})
 @_safe
 def generate_tracking_code(
     event_name: str,
@@ -3586,7 +3600,7 @@ def generate_tracking_code(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(title="Budget forecast", annotations=_READONLY, tags={"ads"})
+@_tool(title="Budget forecast", annotations=_READONLY, tags={"ads"})
 @_safe
 def estimate_budget(
     keywords: _DictList,
@@ -3623,7 +3637,7 @@ def estimate_budget(
     )
 
 
-@mcp.tool(title="Keyword ideas", annotations=_READONLY, tags={"ads"})
+@_tool(title="Keyword ideas", annotations=_READONLY, tags={"ads"})
 @_safe
 def discover_keywords(
     seed_keywords: _StrList = [],  # noqa: B006 — mutable default required for MCP JSON schema
@@ -3671,7 +3685,7 @@ def discover_keywords(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(title="Suggest brands", annotations=_READONLY, tags={"ads"})
+@_tool(title="Suggest brands", annotations=_READONLY, tags={"ads"})
 @_safe
 def suggest_brands(
     brand_prefix: str,
@@ -3708,7 +3722,7 @@ def suggest_brands(
     )
 
 
-@mcp.tool(title="Check brand names", annotations=_READONLY, tags={"ads"})
+@_tool(title="Check brand names", annotations=_READONLY, tags={"ads"})
 @_safe
 def check_brand_names(
     brand_names: _StrList,
@@ -3741,7 +3755,7 @@ def check_brand_names(
         customer_id=customer_id or current_config().ads.customer_id,
     )
 
-@mcp.tool(title="List brand lists", annotations=_READONLY, tags={"ads"})
+@_tool(title="List brand lists", annotations=_READONLY, tags={"ads"})
 @_safe
 def get_brand_lists(
     customer_id: str = "",
@@ -3761,7 +3775,7 @@ def get_brand_lists(
         customer_id=customer_id or current_config().ads.customer_id,
     )
 
-@mcp.tool(title="Brands in a brand list", annotations=_READONLY, tags={"ads"})
+@_tool(title="Brands in a brand list", annotations=_READONLY, tags={"ads"})
 @_safe
 def get_brand_list_brands(
     shared_set_id: str,
@@ -3785,7 +3799,7 @@ def get_brand_list_brands(
         shared_set_id=shared_set_id,
     )
 
-@mcp.tool(title="Campaigns using a brand list", annotations=_READONLY, tags={"ads"})
+@_tool(title="Campaigns using a brand list", annotations=_READONLY, tags={"ads"})
 @_safe
 def get_brand_list_campaigns(
     shared_set_id: str = "",
@@ -3811,7 +3825,7 @@ def get_brand_list_campaigns(
         shared_set_id=shared_set_id,
     )
 
-@mcp.tool(title="Draft a brand list", annotations=_WRITE, tags={"ads"})
+@_tool(title="Draft a brand list", annotations=_WRITE, tags={"ads"})
 @_safe
 def propose_brand_list(
     list_name: str,
@@ -3849,7 +3863,7 @@ def propose_brand_list(
         negative=negative,
     )
 
-@mcp.tool(title="Draft additions to a brand list", annotations=_WRITE, tags={"ads"})
+@_tool(title="Draft additions to a brand list", annotations=_WRITE, tags={"ads"})
 @_safe
 def add_to_brand_list(
     shared_set_id: str,
@@ -3879,7 +3893,7 @@ def add_to_brand_list(
         brand_ids=brand_ids,
     )
 
-@mcp.tool(title="Draft removing brands from a list", annotations=_DESTRUCTIVE, tags={"ads"})
+@_tool(title="Draft removing brands from a list", annotations=_DESTRUCTIVE, tags={"ads"})
 @_safe
 def remove_from_brand_list(
     shared_set_id: str,
@@ -3909,7 +3923,7 @@ def remove_from_brand_list(
         criterion_ids=criterion_ids,
     )
 
-@mcp.tool(title="Draft attaching a brand list", annotations=_WRITE, tags={"ads"})
+@_tool(title="Draft attaching a brand list", annotations=_WRITE, tags={"ads"})
 @_safe
 def attach_brand_list_to_campaigns(
     shared_set_id: str,
@@ -3946,7 +3960,7 @@ def attach_brand_list_to_campaigns(
         negative=negative,
     )
 
-@mcp.tool(title="Draft detaching a brand list", annotations=_DESTRUCTIVE, tags={"ads"})
+@_tool(title="Draft detaching a brand list", annotations=_DESTRUCTIVE, tags={"ads"})
 @_safe
 def detach_brand_list_from_campaigns(
     shared_set_id: str,
