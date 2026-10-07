@@ -3281,6 +3281,152 @@ class TestThePlanIsClaimedBeforeUploading:
         assert "Resume the CSV at line 2002" in result["message"]
 
 
+class TestNothingSentIsClassifiedHonestly:
+    """Phase 1 sends nothing — but only the *first* batch means "nothing at all".
+
+    A build failure in batch 2 used to be reported as "Nothing was sent" and
+    the plan stayed retryable. Batch 1 was already in the account, so the
+    obvious retry re-sent it, and call conversions have no dedup key to absorb
+    the duplicates.
+    """
+
+    def _config(self, tmp_path):
+        return AdLoopConfig(
+            ads=AdsConfig(customer_id="123-456-7890"),
+            safety=SafetyConfig(
+                require_dry_run=False, log_file=str(tmp_path / "audit.log")
+            ),
+        )
+
+    def _rows(self, lines):
+        return [
+            {"source_line": line, "caller_id": f"+1415555{index:04d}"}
+            for index, line in enumerate(lines)
+        ]
+
+    def _plan(self, config, tmp_path, monkeypatch, *, rows=3, upload=None):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CALLS")
+        path = tmp_path / "phone.csv"
+        path.write_text(
+            _CALL_HEADER
+            + "".join(
+                f"+1415555{i:04d},2026-03-01T12:00:00Z,My Action,"
+                f"2026-03-01T13:00:00Z,10,USD\n"
+                for i in range(rows)
+            )
+        )
+        monkeypatch.setattr(conversion_actions, "_MAX_ROWS_PER_REQUEST", 2)
+        preview = conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+        upload = upload or _FakeUploadService(results_count=10_000)
+        client = _client_with(
+            upload_service=upload, ads_service=_EchoActionRows("UPLOAD_CALLS")
+        )
+        monkeypatch.setattr("adloop.ads.client.get_ads_client", lambda _cfg: client)
+        return preview, upload
+
+    def test_the_first_batch_means_nothing_was_sent(self, monkeypatch):
+        monkeypatch.setattr(conversion_actions, "_MAX_ROWS_PER_REQUEST", 2)
+        sent: list[int] = []
+
+        def build(chunk):
+            raise ValueError("cannot set caller_id")
+
+        def send(payload):
+            sent.append(len(payload))
+            return SimpleNamespace(results=[])
+
+        with pytest.raises(conversion_actions.UploadNotSentError) as info:
+            conversion_actions._upload_in_batches(self._rows([2, 3]), build, send)
+
+        assert "Nothing was uploaded" in str(info.value)
+        assert sent == []
+
+    def test_a_later_batch_build_failure_is_a_partial_upload(self, monkeypatch):
+        monkeypatch.setattr(conversion_actions, "_MAX_ROWS_PER_REQUEST", 2)
+        built: list[int] = []
+        sent: list[int] = []
+
+        def build(chunk):
+            built.append(len(chunk))
+            if len(built) == 2:
+                raise ValueError("cannot set caller_id")
+            return list(chunk)
+
+        def send(payload):
+            sent.append(len(payload))
+            return SimpleNamespace(results=[])
+
+        with pytest.raises(conversion_actions.PartialUploadError) as info:
+            conversion_actions._upload_in_batches(
+                self._rows([2, 3, 4]), build, send
+            )
+
+        error = info.value
+        assert error.unknown_status is False
+        assert error.uploaded_total == 2
+        assert error.uncertain_lines == []
+        # Provably not sent, so its own first line is the one to resume at.
+        assert error.resume_from_line == 4
+        assert sent == [2]
+        assert "must not be sent again" in str(error)
+
+    def test_a_broken_row_in_batch_two_retires_the_plan(
+        self, tmp_path, monkeypatch
+    ):
+        """End to end: the plan must not stay usable after batch 1 went out."""
+        config = self._config(tmp_path)
+        preview, upload = self._plan(config, tmp_path, monkeypatch)
+
+        # Row 3 sits in the second batch; an action name that is not in the
+        # plan's resolved map makes the proto builder raise before the request.
+        plan = preview_store.get_plan(preview["plan_id"])
+        rows = list(plan.apply_only_payload["rows"])
+        rows[2]["conversion_name"] = "Not In This Plan"
+        plan.apply_only_payload["rows"] = rows
+        preview_store.store_plan(plan)
+
+        result = write.confirm_and_apply(
+            config, plan_id=preview["plan_id"], dry_run=False
+        )
+
+        assert result["status"] == "PARTIAL_UPLOAD", result
+        assert result["uploaded_total"] == 2
+        assert result["resume_from_line"] == 4
+        assert "uncertain_lines" not in result
+        assert len(upload.calls) == 1  # only batch 1 was in a request
+        # Retired, so the reflex to confirm again cannot resend batch 1.
+        assert preview_store.get_plan(preview["plan_id"]) is None
+
+        again = write.confirm_and_apply(
+            config, plan_id=preview["plan_id"], dry_run=False
+        )
+        assert "No pending plan found" in again["error"]
+        assert len(upload.calls) == 1
+
+    def test_a_rejected_first_batch_keeps_the_plan(self, tmp_path, monkeypatch):
+        """Google answered for the whole request, so nothing was written."""
+        config = self._config(tmp_path)
+        upload = _FakeUploadService(
+            results_count=10_000,
+            fail_on_call=1,
+            fail_exception=_google_rejection("INVALID_ARGUMENT"),
+        )
+        preview, _upload = self._plan(
+            config, tmp_path, monkeypatch, rows=2, upload=upload
+        )
+
+        result = write.confirm_and_apply(
+            config, plan_id=preview["plan_id"], dry_run=False
+        )
+
+        assert "Nothing was uploaded" in result["error"]
+        # Still there: re-drafting the whole file to retry one rejection is
+        # needless, and nothing was written that a retry could duplicate.
+        assert preview_store.get_plan(preview["plan_id"]) is not None
+
+
 class TestClaimFallbackAndUnknownStatus:
     """The store hook is a requirement, not a hard dependency."""
 

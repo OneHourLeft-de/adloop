@@ -1319,7 +1319,6 @@ class PartialUploadError(RuntimeError):
         batches: list[dict],
         uploaded_total: int,
         resume_from_line: object,
-        dry_run: bool,
         row_errors: list[dict] | None = None,
         unknown_status: bool = False,
         uncertain_lines: list[int] | None = None,
@@ -1329,13 +1328,13 @@ class PartialUploadError(RuntimeError):
         self.batches = batches
         self.uploaded_total = uploaded_total
         self.resume_from_line = resume_from_line
-        self.dry_run = dry_run
         self.row_errors = row_errors or []
         # A transport failure is not a rejection: the batch may have reached
         # Google, so the caller must not simply send it again.
         self.unknown_status = unknown_status
-        # [first, one-past-last] of the batch whose fate is unknown, so a caller
-        # can check exactly those rows instead of a bare "resume from" hint.
+        # Inclusive [first, last] of the batch whose fate is unknown, so a
+        # caller can check exactly those rows instead of a bare "resume from"
+        # hint. Same shape as first_source_line/last_source_line in the ledger.
         self.uncertain_lines = uncertain_lines or []
         # How many rows went into that batch. Lines can carry comments or be
         # non-contiguous, so the count is carried instead of derived from the
@@ -1431,11 +1430,20 @@ def _failure_from(
             "uploaded — a dry run only validates."
         )
     elif rejected:
+        if done:
+            tail = (
+                f"{done} row(s) from {completed_batches} batch(es) are already "
+                f"uploaded and must not be sent again — resume the CSV at line "
+                f"{first_line}."
+            )
+        else:
+            tail = (
+                "Nothing was uploaded — fix those rows and draft the file "
+                "again."
+            )
         message = (
             f"Upload failed in batch {index + 1} of {batch_total} (CSV lines "
-            f"{first_line}-{last_line}): {detail} {done} row(s) from "
-            f"{completed_batches} batch(es) are already uploaded and must not "
-            f"be sent again — resume the CSV at line {first_line}."
+            f"{first_line}-{last_line}): {detail} {tail}"
         )
     else:
         rest = (
@@ -1461,7 +1469,6 @@ def _failure_from(
         # so pointing at its first line would invite a duplicate, and there is
         # nothing left to draft when no batch follows.
         resume_from_line=resume_line if unknown else first_line,
-        dry_run=dry_run,
         row_errors=row_errors + batch_row_errors,
         unknown_status=unknown,
         # Inclusive, like ``first_source_line``/``last_source_line`` in the
@@ -1504,14 +1511,34 @@ def _upload_in_batches(
         # is really still to be sent.
         next_line = _next_batch_first_line(rows, start + len(chunk))
 
-        # Phase 1: build the request. Nothing has left the process yet, so a
-        # failure here is an explicit "not sent" and the plan stays retryable.
+        # Phase 1: build the request. For the FIRST batch nothing has left the
+        # process, so the failure is an explicit "not sent" and the plan stays
+        # retryable. Later batches are a different story: the earlier ones are
+        # already in the account, so a retry would send those again — that is a
+        # partial upload, and the plan has to be retired.
         try:
             payload = build(chunk)
-        except Exception as exc:  # noqa: BLE001 — re-raised as "not sent"
-            raise UploadNotSentError(
-                f"Batch {index + 1} of {batch_total} could not be built (CSV "
-                f"lines {first_line}-{last_line}): {exc} Nothing was sent."
+        except Exception as exc:  # noqa: BLE001 — re-raised per the ledger
+            done = sum(batch["uploaded"] for batch in ledger)
+            if index == 0 or dry_run:
+                raise UploadNotSentError(
+                    f"Batch {index + 1} of {batch_total} could not be built "
+                    f"(CSV lines {first_line}-{last_line}): {exc} Nothing was "
+                    "uploaded."
+                ) from exc
+            # This batch provably did not go out, so the rows to resume at are
+            # its own first line — unlike a transport failure, where the batch
+            # itself is uncertain and has to be checked first.
+            raise PartialUploadError(
+                f"Batch {index + 1} of {batch_total} (CSV lines {first_line}-"
+                f"{last_line}) could not be built: {exc} {done} row(s) from "
+                f"{len(ledger)} earlier batch(es) are already uploaded and must "
+                f"not be sent again — resume the CSV at line {first_line}.",
+                batches=ledger,
+                uploaded_total=done,
+                resume_from_line=first_line,
+                row_errors=row_errors,
+                unknown_status=False,
             ) from exc
 
         # Phase 2: send it. From here on the batch's fate is Google's.
@@ -1576,7 +1603,6 @@ def _upload_in_batches(
                 batches=ledger,
                 uploaded_total=sum(batch["uploaded"] for batch in ledger),
                 resume_from_line=next_line,
-                dry_run=dry_run,
                 row_errors=row_errors,
                 unknown_status=True,
                 uncertain_lines=[first_line, last_line],

@@ -2911,9 +2911,18 @@ def confirm_and_apply(
 
         # For an upload the default is the cautious one: anything that failed
         # once the request was on its way may have been received, so the plan
-        # stays claimed unless the error says explicitly that nothing was sent.
-        if isinstance(e, UploadNotSentError) or not plan.operation.startswith(
-            "upload_"
+        # stays claimed unless the error says explicitly that nothing arrived.
+        # A rejected first request is that case — Google answered for the whole
+        # batch and no earlier one had gone out, so the plan is still good.
+        upload_failed_after_nothing = (
+            isinstance(e, PartialUploadError)
+            and not e.uploaded_total
+            and not e.unknown_status
+        )
+        if (
+            isinstance(e, UploadNotSentError)
+            or upload_failed_after_nothing
+            or not plan.operation.startswith("upload_")
         ):
             store_plan(plan)
 
