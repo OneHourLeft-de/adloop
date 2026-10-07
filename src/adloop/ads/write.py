@@ -2686,9 +2686,9 @@ def _partial_upload_message(e: object) -> str:
             "anything."
         )
     return (
-        f"{e.uploaded_total} row(s) are uploaded; the plan is no longer "
-        "pending, so confirming it again cannot resend them. Resume the CSV at "
-        f"line {e.resume_from_line} and draft the rest as a new upload."
+        f"{e.sent_total} row(s) were sent; the plan is no longer pending, so "
+        "confirming it again cannot resend them. Resume the CSV at line "
+        f"{e.resume_from_line} and draft the rest as a new upload."
     )
 
 
@@ -2945,7 +2945,7 @@ def confirm_and_apply(
         # batch and no earlier one had gone out, so the plan is still good.
         upload_failed_after_nothing = (
             isinstance(e, PartialUploadError)
-            and not e.uploaded_total
+            and not e.sent_total
             and not e.unknown_status
         )
         if (
@@ -2955,7 +2955,7 @@ def confirm_and_apply(
         ):
             store_plan(plan)
 
-        if isinstance(e, PartialUploadError) and (e.uploaded_total or e.unknown_status):
+        if isinstance(e, PartialUploadError) and (e.sent_total or e.unknown_status):
             log_mutation(
                 config.safety.log_file,
                 operation=plan.operation,
@@ -2982,7 +2982,13 @@ def confirm_and_apply(
                 "plan_id": plan.plan_id,
                 "operation": plan.operation,
                 "error": error_message,
-                "uploaded_total": e.uploaded_total,
+                "sent_total": e.sent_total,
+                **(
+                    {"accepted_total": sum(b["accepted"] for b in e.batches)}
+                    if e.batches
+                    and all(b.get("accepted") is not None for b in e.batches)
+                    else {}
+                ),
                 "batches": e.batches,
                 "resume_from_line": e.resume_from_line,
                 "unknown_status": e.unknown_status,

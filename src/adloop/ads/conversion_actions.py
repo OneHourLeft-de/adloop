@@ -1461,7 +1461,7 @@ class PartialUploadError(RuntimeError):
         message: str,
         *,
         batches: list[dict],
-        uploaded_total: int,
+        sent_total: int,
         resume_from_line: object,
         row_errors: list[dict] | None = None,
         unknown_status: bool = False,
@@ -1470,7 +1470,7 @@ class PartialUploadError(RuntimeError):
     ) -> None:
         super().__init__(message)
         self.batches = batches
-        self.uploaded_total = uploaded_total
+        self.sent_total = sent_total
         self.resume_from_line = resume_from_line
         self.row_errors = row_errors or []
         # A transport failure is not a rejection: the batch may have reached
@@ -1576,8 +1576,8 @@ def _failure_from(
     elif rejected:
         if done:
             tail = (
-                f"{done} row(s) from {completed_batches} batch(es) are already "
-                f"uploaded and must not be sent again — resume the CSV at line "
+                f"{done} row(s) from {completed_batches} batch(es) were already "
+                f"sent and must not be sent again — resume the CSV at line "
                 f"{first_line}."
             )
         else:
@@ -1600,14 +1600,14 @@ def _failure_from(
             f"{last_line}) failed with an unknown outcome: {detail} Those lines "
             "may or may not have been received — check the conversion action "
             "for them before anything else; do not resend them "
-            f"unconditionally. {done} row(s) from earlier batches are "
-            f"definitely in, and {rest}"
+            f"unconditionally. {done} row(s) from earlier batches were sent and "
+            f"answered — the batch ledger shows how many matched — and {rest}"
         )
 
     return PartialUploadError(
         message,
         batches=ledger,
-        uploaded_total=done,
+        sent_total=done,
         # For an unknown outcome the line to resume from is the first line of
         # the *next* batch: the uncertain batch itself has to be checked first,
         # so pointing at its first line would invite a duplicate, and there is
@@ -1635,16 +1635,15 @@ def _upload_in_batches(
 
     Row numbers are the physical CSV lines the rows came from, so a message
     means the same thing to whoever edits the file. A failure in batch 3 leaves
-    batches 1-2 uploaded, so the error says which lines are already in: calls
+    batches 1-2 already sent, so the error says which lines are already in: calls
     have no dedup key at all, and click uploads only dedupe on an order id, so
     a blind retry double-counts whatever went through. In a dry run nothing was
-    uploaded and the error says so instead.
+    sent and the error says so instead.
     """
     total = len(rows)
     batch_total = (total + _MAX_ROWS_PER_REQUEST - 1) // _MAX_ROWS_PER_REQUEST
     ledger: list[dict] = []
     row_errors: list[dict] = []
-    success_total = 0
 
     for index in range(batch_total):
         start = index * _MAX_ROWS_PER_REQUEST
@@ -1663,7 +1662,7 @@ def _upload_in_batches(
         try:
             payload = build(chunk)
         except Exception as exc:  # noqa: BLE001 — re-raised per the ledger
-            done = sum(batch["uploaded"] for batch in ledger)
+            done = sum(batch["sent"] for batch in ledger)
             if index == 0 or dry_run:
                 raise UploadNotSentError(
                     f"Batch {index + 1} of {batch_total} could not be built "
@@ -1676,10 +1675,10 @@ def _upload_in_batches(
             raise PartialUploadError(
                 f"Batch {index + 1} of {batch_total} (CSV lines {first_line}-"
                 f"{last_line}) could not be built: {exc} {done} row(s) from "
-                f"{len(ledger)} earlier batch(es) are already uploaded and must "
-                f"not be sent again — resume the CSV at line {first_line}.",
+                f"{len(ledger)} earlier batch(es) were already sent and must not be "
+                f"sent again — resume the CSV at line {first_line}.",
                 batches=ledger,
-                uploaded_total=done,
+                sent_total=done,
                 resume_from_line=first_line,
                 row_errors=row_errors,
                 unknown_status=False,
@@ -1696,7 +1695,7 @@ def _upload_in_batches(
                 first_line=first_line,
                 last_line=last_line,
                 resume_line=next_line,
-                done=sum(batch["uploaded"] for batch in ledger),
+                done=sum(batch["sent"] for batch in ledger),
                 completed_batches=len(ledger),
                 chunk=chunk,
                 start=start,
@@ -1716,14 +1715,17 @@ def _upload_in_batches(
             success = sum(
                 1 for r in results if getattr(r, "conversion_action", "")
             )
-            success_total += success
             ledger.append({
                 "batch": index + 1,
                 "first_source_line": first_line,
                 "last_source_line": last_line,
-                "uploaded": len(payload),
-                "success_count": success,
-                "failure_count": len(results) - success,
+                # `sent` is what left the process; `accepted` is what Google
+                # matched. A dry run answers with placeholder results and no
+                # matching information, so its counts stay unknown instead of
+                # pretending every row failed.
+                "sent": len(payload),
+                "accepted": None if dry_run else success,
+                "rejected": None if dry_run else len(results) - success,
             })
             partial = getattr(response, "partial_failure_error", None)
             if partial and partial.message:
@@ -1745,7 +1747,7 @@ def _upload_in_batches(
                 f"be read: {exc} The rows may have been received — check the "
                 "conversion action before resending them.",
                 batches=ledger,
-                uploaded_total=sum(batch["uploaded"] for batch in ledger),
+                sent_total=sum(batch["sent"] for batch in ledger),
                 resume_from_line=next_line,
                 row_errors=row_errors,
                 unknown_status=True,
@@ -1753,11 +1755,14 @@ def _upload_in_batches(
                 uncertain_rows=len(chunk),
             ) from exc
 
-    uploaded_total = sum(batch["uploaded"] for batch in ledger)
+    sent_total = sum(batch["sent"] for batch in ledger)
+    accepted_total = (
+        None if dry_run else sum(batch["accepted"] for batch in ledger)
+    )
     return {
-        "uploaded_total": uploaded_total,
-        "success_count": success_total,
-        "failure_count": uploaded_total - success_total,
+        "sent_total": sent_total,
+        "accepted_total": accepted_total,
+        "rejected_total": None if dry_run else sent_total - accepted_total,
         "batch_count": len(ledger),
         "batches": ledger,
         "row_errors": row_errors,

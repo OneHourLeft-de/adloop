@@ -1217,9 +1217,9 @@ class TestApplyUploadCallConversions:
         result = conversion_actions._apply_upload_call_conversions(
             client, "1", self._changes()
         )
-        assert result["uploaded_total"] == 2
-        assert result["success_count"] == 2
-        assert result["failure_count"] == 0
+        assert result["sent_total"] == 2
+        assert result["accepted_total"] == 2
+        assert result["rejected_total"] == 0
         sent = upload.called_with["conversions"]
         assert sent[0].caller_id == "+14155550142"
         assert sent[0].conversion_action == (
@@ -1241,8 +1241,8 @@ class TestApplyUploadCallConversions:
         result = conversion_actions._apply_upload_call_conversions(
             client, "1", self._changes()
         )
-        assert result["success_count"] == 1
-        assert result["failure_count"] == 1
+        assert result["accepted_total"] == 1
+        assert result["rejected_total"] == 1
 
     def test_zero_matched_reports_zero_success(self, tmp_path):
         upload = _FakeUploadService(results_count=0)
@@ -1253,8 +1253,8 @@ class TestApplyUploadCallConversions:
         result = conversion_actions._apply_upload_call_conversions(
             client, "1", self._changes()
         )
-        assert result["success_count"] == 0
-        assert result["failure_count"] == 2
+        assert result["accepted_total"] == 0
+        assert result["rejected_total"] == 2
 
     def test_consent_applied_to_protos(self, tmp_path):
         upload = _FakeUploadService(results_count=2)
@@ -1534,8 +1534,8 @@ class TestApplyUploadEcForLeads:
                 client, "1", self._changes()
             )
         )
-        assert result["uploaded_total"] == 2
-        assert result["success_count"] == 2
+        assert result["sent_total"] == 2
+        assert result["accepted_total"] == 2
         sent = upload.called_with["conversions"]
         # Row 1: email + phone. The row also holds hashed names, but names
         # without country and postal code are not an address identifier, so no
@@ -1592,8 +1592,8 @@ class TestApplyUploadEcForLeads:
                 client, "1", self._changes()
             )
         )
-        assert result["success_count"] == 1
-        assert result["failure_count"] == 1
+        assert result["accepted_total"] == 1
+        assert result["rejected_total"] == 1
 
     def test_zero_matched_reports_zero_success(self, tmp_path):
         client, _ = self._client(results_count=0)
@@ -1602,8 +1602,8 @@ class TestApplyUploadEcForLeads:
                 client, "1", self._changes()
             )
         )
-        assert result["success_count"] == 0
-        assert result["failure_count"] == 2
+        assert result["accepted_total"] == 0
+        assert result["rejected_total"] == 2
 
     def test_order_id_propagated_to_proto(self, tmp_path):
         client, upload = self._client(results_count=2)
@@ -2149,15 +2149,50 @@ class TestUploadBatching:
 
         assert [len(c["conversions"]) for c in upload.calls] == [2000, 501]
         assert result["batch_count"] == 2
-        assert result["uploaded_total"] == 2501
+        assert result["sent_total"] == 2501
         # Hand-built rows have no source_line, so the ledger falls back to
         # positions; a real draft reports the CSV lines (see the test below).
         assert result["batches"] == [
             {"batch": 1, "first_source_line": 1, "last_source_line": 2000,
-             "uploaded": 2000, "success_count": 2000, "failure_count": 0},
+             "sent": 2000, "accepted": 2000, "rejected": 0},
             {"batch": 2, "first_source_line": 2001, "last_source_line": 2501,
-             "uploaded": 501, "success_count": 501, "failure_count": 0},
+             "sent": 501, "accepted": 501, "rejected": 0},
         ]
+
+    def test_the_ledger_separates_sent_from_accepted(self, monkeypatch):
+        """Rows Google rejected per row were sent, not accepted."""
+        monkeypatch.setattr(conversion_actions, "_MAX_ROWS_PER_REQUEST", 5)
+        upload = _FakeUploadService(results_count=2)   # 2 of 3 carry a match
+        client = _client_with(upload_service=upload, ads_service=self._ads())
+
+        result = conversion_actions._apply_upload_call_conversions(
+            client, "1234567890", self._changes(3)
+        )
+
+        assert result["sent_total"] == 3
+        assert result["accepted_total"] == 2
+        assert result["rejected_total"] == 1
+        assert result["batches"][0]["sent"] == 3
+        assert result["batches"][0]["accepted"] == 2
+
+    def test_a_dry_run_admits_it_cannot_count_matches(self, monkeypatch):
+        """Validate-only answers carry no results, so those counts are unknown."""
+        monkeypatch.setattr(conversion_actions, "_MAX_ROWS_PER_REQUEST", 5)
+        client = _client_with(
+            upload_service=_FakeUploadService(results_count=0), ads_service=self._ads()
+        )
+        from adloop.ads.validate_only import ValidateOnlyClient
+
+        validator = ValidateOnlyClient(client)
+
+        result = conversion_actions._apply_upload_call_conversions(
+            validator, "1234567890", self._changes(3)
+        )
+
+        assert result["sent_total"] == 3
+        assert result["accepted_total"] is None
+        assert result["rejected_total"] is None
+        assert result["batches"][0]["accepted"] is None
 
     def test_partial_failure_is_always_switched_on(self):
         upload = _FakeUploadService(results_count=1)
@@ -2187,12 +2222,12 @@ class TestUploadBatching:
         message = str(excinfo.value)
         assert "batch 2 of 2" in message
         assert "CSV lines 2001-2501" in message
-        assert "2000 row(s) from 1 batch(es) are already uploaded" in message
+        assert "2000 row(s) from 1 batch(es) were already sent" in message
         assert "resume the CSV at line 2001" in message
         # The ledger travels as data, not only inside the text.
-        assert excinfo.value.uploaded_total == 2000
+        assert excinfo.value.sent_total == 2000
         assert excinfo.value.resume_from_line == 2001
-        assert excinfo.value.batches[0]["uploaded"] == 2000
+        assert excinfo.value.batches[0]["sent"] == 2000
 
     def test_ec_upload_batches_too(self):
         upload = _FakeClickUploadService(results_count=10_000)
@@ -2853,7 +2888,7 @@ class TestPartialUploadRetiresThePlan:
         )
 
         assert result["status"] == "PARTIAL_UPLOAD", result
-        assert result["uploaded_total"] == 2000
+        assert result["sent_total"] == 2000
         assert result["batches"][0]["first_source_line"] == 2   # header is line 1
         assert result["batches"][0]["last_source_line"] == 2001
         assert result["resume_from_line"] == 2002                # first line of batch 2
@@ -3655,7 +3690,7 @@ class TestThePlanIsClaimedBeforeUploading:
         # The uncertain batch is named inclusively, like the ledger's
         # first/last source lines.
         assert result["uncertain_lines"] == [2002, 2502]
-        assert result["uploaded_total"] == 2000
+        assert result["sent_total"] == 2000
         # This batch is the last one, so there is nothing left to draft — a
         # number here would point past the end of the file.
         assert result["resume_from_line"] is None
@@ -3689,7 +3724,7 @@ class TestThePlanIsClaimedBeforeUploading:
 
         assert result["status"] == "PARTIAL_UPLOAD", result
         assert result["uncertain_lines"] == [2002, 4001]
-        assert result["uploaded_total"] == 2000
+        assert result["sent_total"] == 2000
         # Batch 3 starts on source line 4002: the header is line 1, so row n is
         # on line n + 1.
         assert result["resume_from_line"] == 4002
@@ -3721,8 +3756,8 @@ class TestThePlanIsClaimedBeforeUploading:
         # inside that batch and the resume hint points at its first row.
         assert "uncertain_lines" not in result
         assert result["resume_from_line"] == 2002
-        assert result["uploaded_total"] == 2000
-        assert "2000 row(s) are uploaded" in result["message"]
+        assert result["sent_total"] == 2000
+        assert "2000 row(s) were sent" in result["message"]
         assert "Resume the CSV at line 2002" in result["message"]
 
 
@@ -3925,7 +3960,7 @@ class TestNothingSentIsClassifiedHonestly:
 
         error = info.value
         assert error.unknown_status is False
-        assert error.uploaded_total == 2
+        assert error.sent_total == 2
         assert error.uncertain_lines == []
         # Provably not sent, so its own first line is the one to resume at.
         assert error.resume_from_line == 4
@@ -3952,7 +3987,7 @@ class TestNothingSentIsClassifiedHonestly:
         )
 
         assert result["status"] == "PARTIAL_UPLOAD", result
-        assert result["uploaded_total"] == 2
+        assert result["sent_total"] == 2
         assert result["resume_from_line"] == 4
         assert "uncertain_lines" not in result
         assert len(upload.calls) == 1  # only batch 1 was in a request
@@ -4158,7 +4193,7 @@ class TestUnreadableResponseAndTimeZoneRows:
         # The request went out but its answer could not be read, so the batch
         # is uncertain, not uploaded: ``uploaded_total`` counts only what is
         # proven to be in.
-        assert result["uploaded_total"] == 0
+        assert result["sent_total"] == 0
         assert result["uncertain_lines"] == [2, 4]
         assert result["resume_from_line"] is None
         assert "could not be read" in result["error"]
@@ -4269,7 +4304,7 @@ class TestResumeLineNamesTheNextBatch:
         assert error.unknown_status is True
         assert error.uncertain_lines == [2, 10]
         assert error.uncertain_rows == 2
-        assert error.uploaded_total == 0
+        assert error.sent_total == 0
         assert error.resume_from_line == 20
 
     def test_the_last_batch_has_nothing_to_resume(self, monkeypatch):
@@ -4281,7 +4316,7 @@ class TestResumeLineNamesTheNextBatch:
         )
 
         # Only the first batch is provably in; the second may or may not be.
-        assert error.uploaded_total == 2
+        assert error.sent_total == 2
         assert error.uncertain_lines == [4, 4]
         assert error.uncertain_rows == 1
         assert error.resume_from_line is None
