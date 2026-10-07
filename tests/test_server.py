@@ -417,3 +417,42 @@ class TestToolsets:
         before = list(server.mcp._transforms)
         server._apply_toolsets_env()
         assert server.mcp._transforms == before
+
+
+class TestDirectoryReadiness:
+    """What the Claude and ChatGPT connector directories check on every tool."""
+
+    @pytest.mark.asyncio
+    async def test_every_tool_is_titled_and_fully_annotated(self):
+        from adloop.server import mcp
+
+        for tool in await mcp.list_tools():
+            ann = tool.annotations
+            assert tool.title, tool.name
+            assert ann is not None, tool.name
+            assert ann.read_only_hint is not None, tool.name
+            assert ann.destructive_hint is not None, tool.name
+            assert ann.open_world_hint is True, tool.name
+            assert len(tool.name) <= 64, tool.name
+
+    @pytest.mark.asyncio
+    async def test_free_form_query_tools_link_the_api_they_query(self):
+        from adloop.server import mcp
+
+        tools = {t.name: t for t in await mcp.list_tools()}
+        for name, docs in {
+            "run_gaql": "https://developers.google.com/google-ads/api/docs/query/overview",
+            "run_ga4_report": "https://developers.google.com/analytics/devguides/reporting/data/v1/api-schema",
+            "run_gsc_report": "https://developers.google.com/webmaster-tools/v1/searchanalytics/query",
+            "run_reddit_report": "https://ads-api.reddit.com/docs/v3/",
+        }.items():
+            assert docs in tools[name].description, name
+
+    @pytest.mark.asyncio
+    async def test_descriptions_point_at_no_outside_instructions(self):
+        from adloop.server import mcp
+
+        for tool in await mcp.list_tools():
+            text = (tool.description or "").lower()
+            assert "cursor rules" not in text, tool.name
+            assert "always call" not in text, tool.name

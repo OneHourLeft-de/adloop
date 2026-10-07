@@ -13,9 +13,11 @@ from pydantic import BeforeValidator
 from adloop import diagnostics
 from adloop.runtime import current_config
 
-_READONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False)
-_WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
-_DESTRUCTIVE = ToolAnnotations(readOnlyHint=False, destructiveHint=True)
+# openWorldHint: every tool talks to an external service (Google, Reddit,
+# a live web page), which directories such as ChatGPT's require to be said.
+_READONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=True)
+_WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=True)
+_DESTRUCTIVE = ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint=True)
 
 # Toolset taxonomy: every tool carries exactly one of these tags (or "core",
 # which survives every ADLOOP_TOOLSETS selection — health_check and
@@ -552,6 +554,8 @@ def run_ga4_report(
 
     Date formats: "today", "yesterday", "7daysAgo", "28daysAgo", "90daysAgo", or "YYYY-MM-DD".
     If property_id is empty, uses the default from config.
+    Queries the GA4 Data API. Dimensions and metrics:
+    https://developers.google.com/analytics/devguides/reporting/data/v1/api-schema
     """
     from adloop.ga4.reports import run_ga4_report as _impl
 
@@ -660,6 +664,8 @@ def run_gsc_report(
         [{"filters": [{"dimension": "query", "operator": "contains",
                        "expression": "analytics"}]}]
     limit: maximum rows to return (default 100, max 25000).
+    Queries the Search Console API:
+    https://developers.google.com/webmaster-tools/v1/searchanalytics/query
     """
     from adloop.gsc.reports import run_gsc_report as _impl
 
@@ -900,9 +906,9 @@ def get_negative_keyword_lists(
 ) -> dict:
     """List all shared negative keyword lists (SharedSets) in the account.
 
-    Returns each list's ID, name, status, and keyword count. Always call
-    this before propose_negative_keyword_list to avoid creating duplicates —
-    a suitable list may already exist and just need attaching to a campaign.
+    Returns each list's ID, name, status, and keyword count. Useful before
+    propose_negative_keyword_list: a suitable list may already exist and
+    just need attaching to a campaign.
     """
     from adloop.ads.read import get_negative_keyword_lists as _impl
 
@@ -1544,7 +1550,8 @@ def run_gaql(
     """Execute an arbitrary GAQL (Google Ads Query Language) query.
 
     Use this for advanced queries not covered by the other tools.
-    See the GAQL reference in the AdLoop cursor rules for syntax help.
+    Queries the Google Ads API. GAQL syntax and fields:
+    https://developers.google.com/google-ads/api/docs/query/overview
 
     format: "table" (default, readable), "json" (structured), "csv" (exportable)
     """
@@ -2126,8 +2133,8 @@ def add_to_negative_keyword_list(
 
     Use this when a suitable list already exists and only needs more keywords
     (instead of propose_negative_keyword_list, which creates a new list).
-    Always call get_negative_keyword_lists first to find the right shared_set_id
-    and get_negative_keyword_list_keywords to avoid duplicating existing terms.
+    The shared_set_id comes from get_negative_keyword_lists;
+    get_negative_keyword_list_keywords shows the terms already in a list.
 
     shared_set_id: numeric ID from get_negative_keyword_lists (shared_set.id).
     keywords: list of keyword strings to append (duplicates in the input list
@@ -2816,6 +2823,7 @@ def run_reddit_report(
     (HOUR and DATE cannot be combined). Dates are account-local days.
     filter: Reddit filter expression (e.g. "campaign_id==abc123").
     Microcurrency fields are converted to currency amounts.
+    Queries the Reddit Ads API: https://ads-api.reddit.com/docs/v3/
     """
     from adloop.reddit.read import run_reddit_report as _impl
 
@@ -3735,8 +3743,8 @@ def get_brand_lists(
 ) -> dict:
     """List all brand lists (SharedSets of type BRANDS) in the account.
 
-    Returns each list's ID, name, status, and member count. Call this before
-    propose_brand_list so an existing list can be reused instead of duplicated.
+    Returns each list's ID, name, status, and member count. Useful before
+    propose_brand_list, so an existing list can be reused instead of duplicated.
 
     Args:
         customer_id: Ads account ID. Defaults to the configured account.
