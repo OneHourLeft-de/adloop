@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import functools
+import inspect
 import json
 from typing import Annotated, Callable
 
 from fastmcp import FastMCP
+from fastmcp.utilities.docstring_parsing import parse_docstring
 from mcp.types import ToolAnnotations
 from pydantic import BeforeValidator
 
@@ -166,18 +168,63 @@ mcp = FastMCP(
 )
 
 
-def _tool(*, title: str, annotations: ToolAnnotations, **kwargs):
-    """Register a tool with its title in both places MCP defines one.
+# The API each toolset calls, linked at the end of every tool description:
+# directory reviews ask descriptions to reference the API they target.
+_API_DOCS: dict[str, str] = {
+    "ads": "Google Ads API: https://developers.google.com/google-ads/api/docs/start",
+    "ga4": (
+        "Google Analytics Data API: "
+        "https://developers.google.com/analytics/devguides/reporting/data/v1 "
+        "and Admin API: https://developers.google.com/analytics/devguides/config/admin/v1"
+    ),
+    "tracking": (
+        "Google Analytics Data API: "
+        "https://developers.google.com/analytics/devguides/reporting/data/v1 "
+        "and Google Ads API: https://developers.google.com/google-ads/api/docs/start"
+    ),
+    "gtm": "Tag Manager API: https://developers.google.com/tag-platform/tag-manager/api/v2",
+    "gsc": "Search Console API: https://developers.google.com/webmaster-tools",
+    "web": "PageSpeed Insights API: https://developers.google.com/speed/docs/insights/v5/about",
+    "merchant": "Merchant API: https://developers.google.com/merchant/api/overview",
+    "reddit": "Reddit Ads API: https://ads-api.reddit.com/docs/v3/",
+    # health_check and confirm_and_apply act on whichever platform is set up.
+    "core": (
+        "Google Ads API: https://developers.google.com/google-ads/api/docs/start, "
+        "Google Analytics Data API: "
+        "https://developers.google.com/analytics/devguides/reporting/data/v1 "
+        "and Reddit Ads API: https://ads-api.reddit.com/docs/v3/"
+    ),
+}
+
+
+def _tool(*, title: str, annotations: ToolAnnotations, tags: set[str], **kwargs):
+    """Register a tool with its title in both places MCP defines one, and
+    with a link to the API it calls.
 
     The tool's own ``title`` is what clients display; ``annotations.title``
     is what directory reviews (Claude's connector portal) check. One title,
     copied into the shared annotation preset, keeps them from drifting.
+    Descriptions that already link their API (the free-form query tools,
+    which point at the query reference) keep their own link.
     """
-    return mcp.tool(
-        title=title,
-        annotations=annotations.model_copy(update={"title": title}),
-        **kwargs,
-    )
+    annotations = annotations.model_copy(update={"title": title})
+    docs = " ".join(_API_DOCS[tag] for tag in sorted(tags) if tag in _API_DOCS)
+
+    def register(fn):
+        # FastMCP's own parser: it moves an Args: section into the
+        # parameter schema, so the description must not repeat it.
+        description = parse_docstring(fn).description or inspect.cleandoc(fn.__doc__ or "")
+        if docs and "https://" not in description:
+            description = f"{description}\n\n{docs}"
+        return mcp.tool(
+            title=title,
+            annotations=annotations,
+            tags=tags,
+            description=description,
+            **kwargs,
+        )(fn)
+
+    return register
 
 
 def _reddit_structured_error(exc: Exception) -> dict | None:

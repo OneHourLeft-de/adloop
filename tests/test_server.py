@@ -469,6 +469,23 @@ class TestDirectoryReadiness:
             assert docs in tools[name].description, name
 
     @pytest.mark.asyncio
+    async def test_every_description_links_the_api_it_calls(self):
+        """Directory reviews ask each tool to reference its target API."""
+        from adloop.server import mcp
+
+        for tool in await mcp.list_tools():
+            assert "https://" in (tool.description or ""), tool.name
+
+    @pytest.mark.asyncio
+    async def test_docstring_args_stay_in_the_schema_not_the_description(self):
+        from adloop.server import mcp
+
+        tools = {t.name: t for t in await mcp.list_tools()}
+        tool = tools["draft_ai_max_settings"]
+        assert "Args:" not in tool.description
+        assert "description" in tool.parameters["properties"]["campaign_id"]
+
+    @pytest.mark.asyncio
     async def test_descriptions_point_at_no_outside_instructions(self):
         from adloop.server import mcp
 
