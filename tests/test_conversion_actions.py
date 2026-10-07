@@ -4120,6 +4120,35 @@ class TestClaimFallbackAndUnknownStatus:
         assert len(upload.calls) == 1
         assert store.plans == {}
 
+    def test_the_non_atomic_fallback_says_so_once(self, caplog, monkeypatch):
+        """A store without `claim()` cannot stop overlapping confirms."""
+
+        class PlainStore:
+            def __init__(self):
+                self.plans = {}
+
+            def store(self, tenant, plan):
+                self.plans[(tenant, plan.plan_id)] = plan
+
+            def get(self, tenant, plan_id):
+                return self.plans.get((tenant, plan_id))
+
+            def remove(self, tenant, plan_id):
+                self.plans.pop((tenant, plan_id), None)
+
+        monkeypatch.setattr(preview_store, "_FALLBACK_WARNED", False)
+        preview_store.set_plan_store(PlainStore())
+        try:
+            with caplog.at_level("WARNING"):
+                assert preview_store.claim_plan("nope") is None
+                assert preview_store.claim_plan("nope") is None
+        finally:
+            preview_store.set_plan_store(preview_store.InMemoryPlanStore())
+
+        warnings = [r.message for r in caplog.records if "claim()" in r.message]
+        assert len(warnings) == 1, warnings
+        assert "cannot stop two overlapping confirmations" in warnings[0]
+
     def test_a_plan_store_without_claim_is_not_fatal_for_other_operations(self):
         """ `claim_plan` must not raise AttributeError for budgets and keywords. """
 

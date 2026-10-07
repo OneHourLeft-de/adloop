@@ -158,14 +158,24 @@ def remove_plan(plan_id: str) -> None:
     _active_store.remove(current_tenant(), plan_id)
 
 
+_FALLBACK_WARNED = False
+
+
 def claim_plan(plan_id: str) -> ChangePlan | None:
     """Atomically take a plan out of the store (see ``PlanStore.claim``).
 
     ``claim`` is what a store should implement; a store that predates it gets
-    the non-atomic get-then-remove fallback rather than an AttributeError. The
-    hosted store should still add it: without it two confirmations that overlap
-    can both pass this check.
+    the non-atomic get-then-remove fallback rather than an AttributeError.
+
+    **The fallback is not safe against overlapping confirmations**: two calls
+    that interleave between ``get`` and ``remove`` both receive the plan and
+    both upload. It exists so an older custom store keeps working at all; the
+    hosted store implements ``claim``. The first use of the fallback logs a
+    warning once, so a deployment can see that it is running without the real
+    guarantee.
     """
+    global _FALLBACK_WARNED
+
     from adloop.runtime import current_tenant
 
     tenant = current_tenant()
@@ -173,6 +183,16 @@ def claim_plan(plan_id: str) -> ChangePlan | None:
     claim = getattr(store, "claim", None)
     if claim is not None:
         return claim(tenant, plan_id)
+    if not _FALLBACK_WARNED:
+        _FALLBACK_WARNED = True
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Plan store %s has no claim(); falling back to get-then-remove, "
+            "which cannot stop two overlapping confirmations from both "
+            "uploading. Implement claim() on the store.",
+            type(store).__name__,
+        )
     plan = store.get(tenant, plan_id)
     if plan is not None:
         store.remove(tenant, plan_id)
