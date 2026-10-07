@@ -383,6 +383,20 @@ class TestToolsets:
             assert len(hits) == 1, f"{tool.name}: toolset tags {hits or 'MISSING'}"
 
     @pytest.mark.asyncio
+    async def test_every_tool_keeps_the_title_its_decorator_set(self):
+        """A stray @mcp.tool above another one registers the tool twice.
+
+        FastMCP keys by name, so the second registration wins and the tool
+        silently loses the title the real decorator set — the only visible sign
+        of the doubled decorator, since a name-based duplicate check cannot see
+        it.
+        """
+        from adloop.server import mcp
+
+        untitled = sorted(t.name for t in await mcp.list_tools() if not t.title)
+        assert untitled == [], untitled
+
+    @pytest.mark.asyncio
     async def test_selection_exposes_chosen_sets_plus_core(self, monkeypatch):
         from adloop import server
 

@@ -3598,9 +3598,6 @@ def draft_upload_enhanced_conversions_for_leads(
     )
 
 
-@mcp.tool(annotations=_READONLY, tags={"tracking"})
-
-
 @mcp.tool(title="Validate tracking", annotations=_READONLY, tags={"tracking"})
 @_safe
 def validate_tracking(
