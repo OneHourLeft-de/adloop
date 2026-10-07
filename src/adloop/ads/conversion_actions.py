@@ -870,7 +870,10 @@ def _parse_timestamp(value: str, default_tz: str) -> tuple[str, str]:
                 "CSV, or give the timestamp an offset"
             )
         if not _valid_timezone(default_tz):
-            return "", f"uses an unknown time zone ({default_tz})"
+            return "", (
+                "uses a time zone that is not a valid IANA zone id or ±HHMM "
+                "offset"
+            )
         parsed = parsed.replace(tzinfo=_tzinfo(default_tz))
 
     return parsed.isoformat(sep=" ", timespec="seconds"), ""
@@ -966,8 +969,8 @@ def _read_upload_csv(
                             timezone = timezone or value.strip()
                         else:
                             errors.append(
-                                f"Line {start_line}: Parameters:TimeZone="
-                                f"{value.strip()} is not a valid time zone"
+                                f"Line {start_line}: Parameters:TimeZone=… is "
+                                "not a valid IANA zone id or ±HHMM offset"
                             )
                     continue
                 if first.startswith("#"):
@@ -1255,6 +1258,7 @@ def draft_upload_call_conversions(
         action_resources = _resolve_upload_action(
             get_ads_client(config), cid, distinct_actions,
             expected_type="UPLOAD_CALLS",
+            lines=_action_first_lines(rows),
         )
     except ValueError as e:
         return {"error": str(e)}
@@ -1319,7 +1323,12 @@ def draft_upload_call_conversions(
 
 
 def _resolve_upload_action(
-    client: object, cid: str, names: list[str], *, expected_type: str
+    client: object,
+    cid: str,
+    names: list[str],
+    *,
+    expected_type: str,
+    lines: dict[str, object] | None = None,
 ) -> dict[str, str]:
     """Map conversion-action names to resource names, enforcing the type.
 
@@ -1327,6 +1336,11 @@ def _resolve_upload_action(
     column, which is why this is validated at draft time: a typo would
     otherwise surface only after the upload ran. The resource names are stored
     in the plan, so apply does not query again.
+
+    A name that is *not* found is reported by count and CSV line, never by
+    value: a shifted column puts anything into that cell, and an error message
+    travels into the preview and the audit log. Names that were found come from
+    the account (``ca.name``) and may be echoed.
 
     ``UPLOAD_CALLS`` for call uploads, ``UPLOAD_CLICKS`` for Enhanced
     Conversions for Leads (which layers identifier matching on top of click
@@ -1366,12 +1380,22 @@ def _resolve_upload_action(
         )
     missing = [n for n in names if n not in mapping]
     if missing:
+        where = [lines.get(n) for n in missing] if lines else []
         raise ValueError(
-            f"Conversion action(s) not found: {missing}. Verify the "
-            "'Conversion Name' column in the CSV matches an existing action "
-            "name exactly."
+            f"{len(missing)} conversion action name(s) from the 'Conversion "
+            f"Name' column were not found (CSV lines: {where}). Verify the "
+            "column matches existing action names exactly, or read the "
+            "account's actions to compare."
         )
     return mapping
+
+
+def _action_first_lines(rows: list[dict]) -> dict[str, object]:
+    """The first CSV line each conversion-action name appears on."""
+    lines: dict[str, object] = {}
+    for index, row in enumerate(rows, start=1):
+        lines.setdefault(row["conversion_name"], _source_line(row, index))
+    return lines
 
 
 # Google rejects a single upload request above 2,000 conversions with
@@ -2154,6 +2178,7 @@ def draft_upload_enhanced_conversions_for_leads(
         action_resources = _resolve_upload_action(
             get_ads_client(config), cid, distinct_actions,
             expected_type="UPLOAD_CLICKS",
+            lines=_action_first_lines(rows),
         )
     except ValueError as e:
         return {"error": str(e)}

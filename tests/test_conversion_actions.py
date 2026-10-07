@@ -1854,6 +1854,80 @@ class TestCsvInputHardening:
         assert len(rows) == 1
 
 
+class _OnlyKnownActions:
+    """GoogleAdsService stub that knows one action name and nothing else."""
+
+    def __init__(self, known=("My Action",), type_name: str = "UPLOAD_CALLS"):
+        self.known = set(known)
+        self.type_name = type_name
+
+    def search(self, *, customer_id, query):
+        literal = query.split("IN (", 1)[1].split(")", 1)[0]
+        names = [
+            m.replace("''", "'")
+            for m in re.findall(r"'((?:[^']|'')*)'", literal)
+        ]
+        return iter([
+            _FakeSearchRow(
+                name, f"customers/1/conversionActions/{index}", type_name=self.type_name
+            )
+            for index, name in enumerate(
+                [n for n in names if n in self.known], start=1
+            )
+        ])
+
+
+class TestErrorsNeverEchoCells:
+    """A shifted column puts anything in a cell — an error must not repeat it."""
+
+    SENTINEL = "MAX.SCHMIDT@WEB.DE"
+
+    def test_a_bad_timezone_row_names_only_the_line(self, tmp_path):
+        path = tmp_path / "phone.csv"
+        path.write_text(
+            f"Parameters:TimeZone={self.SENTINEL},,,,,\n" + _CALL_HEADER
+        )
+
+        _rows, errors, _tz = conversion_actions._read_upload_csv(str(path))
+
+        text = " ".join(errors)
+        assert "Line 1" in text
+        assert "IANA" in text
+        assert self.SENTINEL not in text
+
+    def test_an_unknown_default_zone_names_no_value(self):
+        _value, problem = conversion_actions._parse_timestamp(
+            "2026-03-01 12:00", self.SENTINEL
+        )
+
+        assert problem
+        assert "IANA" in problem
+        assert self.SENTINEL not in problem
+
+    def test_a_missing_conversion_action_is_reported_by_line(
+        self, config, tmp_path, monkeypatch
+    ):
+        path = tmp_path / "phone.csv"
+        path.write_text(
+            _CALL_HEADER
+            + f"+14155550142,2026-03-01T12:00:00Z,{self.SENTINEL},"
+              "2026-03-01T13:00:00Z,10,USD\n"
+        )
+        client = _client_with(
+            upload_service=_FakeUploadService(),
+            ads_service=_OnlyKnownActions(known=("My Action",)),
+        )
+        monkeypatch.setattr("adloop.ads.client.get_ads_client", lambda _cfg: client)
+
+        result = conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+
+        error = result["error"]
+        assert self.SENTINEL not in error
+        assert "CSV lines: [2]" in error
+
+
 class TestWarningsNeverEchoCells:
     """A shifted column turns a neighbouring cell into the warning text.
 
@@ -4021,8 +4095,9 @@ class TestUnreadableResponseAndTimeZoneRows:
         assert "CSV parse failed" in result["error"]
         details = " ".join(result["details"])
         assert "Line 1" in details
-        assert "+2500" in details
-        assert "not a valid time zone" in details
+        assert "not a valid IANA zone id or ±HHMM offset" in details
+        # The cell is never echoed: a shifted column could put anything here.
+        assert "+2500" not in details
 
     def test_a_bad_offset_row_stops_an_ec_file_too(self, tmp_path, monkeypatch):
         """The time-zone row is read by the shared reader, so both files see it."""
@@ -4040,7 +4115,9 @@ class TestUnreadableResponseAndTimeZoneRows:
         )
 
         assert "CSV parse failed" in result["error"]
-        assert "+0270" in " ".join(result["details"])
+        details = " ".join(result["details"])
+        assert "IANA" in details
+        assert "+0270" not in details
 
     def test_an_iso_offset_with_a_colon_is_accepted(self, tmp_path, monkeypatch):
         _patch_drafts_client(monkeypatch, "UPLOAD_CALLS")
