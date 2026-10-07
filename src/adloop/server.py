@@ -99,12 +99,14 @@ def _build_orchestration_instructions() -> str:
     automatically — so even users running AdLoop without any per-project
     rules file get the absolute must-knows around safety, dry-run defaults,
     and the most common cost-burning mistakes.
+
+    The text itself does not point at those rules files: connector
+    directories reject server text that references outside instruction
+    sources.
     """
     return (
         "AdLoop connects Google Ads + Google Analytics (GA4) + Reddit Ads + your codebase. "
-        "These are the *minimum* orchestration rules — the full ruleset lives "
-        "in `.cursor/rules/adloop.mdc` or `~/.claude/CLAUDE.md` (run "
-        "`adloop install-rules` to install globally). Read these before using "
+        "These are the *minimum* orchestration rules. Read these before using "
         "any write tool.\n\n"
         "SAFETY (always):\n"
         "- Every write tool returns a PREVIEW with a `plan_id`. Show the "
@@ -140,11 +142,7 @@ def _build_orchestration_instructions() -> str:
         "- `cost_micros / 1,000,000` = actual currency. Read tools "
         "auto-compute `metrics.cost`; only `run_gaql` returns raw micros.\n"
         "- New campaigns MUST have `geo_target_ids` and `language_ids` set. "
-        "Untargeted campaigns waste budget.\n\n"
-        "For full orchestration patterns (when to call which tools, GAQL "
-        "reference, language-specific copy guidance, PMax handling, "
-        "shared-set lifecycle, RSA pinning trade-offs), see the canonical "
-        "rules file."
+        "Untargeted campaigns waste budget."
     )
 
 
@@ -467,8 +465,8 @@ def health_check() -> dict:
     """Test AdLoop connectivity — checks OAuth token, GA4 API, Google Ads API,
     and (when configured) the Reddit Ads API.
 
-    Run this first if other tools are failing. Returns status for each service
-    and actionable guidance if something is broken.
+    Returns the status of each service and actionable guidance when something
+    is broken, which makes it the diagnostic for failures in other tools.
     """
     from adloop.ads.client import GOOGLE_ADS_API_VERSION
 
@@ -597,7 +595,7 @@ def health_check() -> dict:
 def get_account_summaries() -> dict:
     """List all GA4 accounts and properties accessible by the authenticated user.
 
-    Use this as the first step to discover which GA4 properties are available.
+    Serves as the discovery step for which GA4 properties are available.
     Returns account names, property names, and property IDs.
     """
     from adloop.ga4.reports import get_account_summaries as _impl
@@ -671,7 +669,7 @@ def get_tracking_events(
     """List all GA4 events and their volume for the given date range.
 
     Returns every distinct event name with its total event count.
-    Use this to understand what tracking is configured and active.
+    Shows what tracking is configured and active.
     """
     from adloop.ga4.tracking import get_tracking_events as _impl
 
@@ -693,9 +691,9 @@ def get_tracking_events(
 def list_gsc_sites() -> dict:
     """List all Google Search Console properties the authenticated user can access.
 
-    Use this first to discover which site URLs are available before running
-    search analytics reports. Returns the site URL and permission level for
-    each property.
+    Serves as the discovery step for the site URLs that search analytics
+    reports (run_gsc_report) take. Returns the site URL and permission level
+    for each property.
     """
     from adloop.gsc.reports import list_gsc_sites as _impl
 
@@ -764,8 +762,8 @@ def analyze_page_speed(url: str, strategy: str = "mobile") -> dict:
     (p75 LCP/INP/CLS + FAST/AVERAGE/SLOW ratings), and the top improvement
     opportunities with estimated savings.
 
-    Use on ad final_urls: slow landing pages depress Quality Score and
-    waste paid clicks. strategy: "mobile" (default — most paid traffic) or
+    Typical input is an ad final_url: slow landing pages depress Quality
+    Score and waste paid clicks. strategy: "mobile" (default — most paid traffic) or
     "desktop". Takes 10-30s; that is normal for a Lighthouse run.
     """
     from adloop.pagespeed import analyze_page_speed as _impl
@@ -783,7 +781,7 @@ def list_merchant_accounts() -> dict:
     """List Google Merchant Center accounts the connected user can access.
 
     Returns each account's numeric ID, name and whether it is a test
-    account. Call it to find the account_id for get_merchant_feed_health;
+    account. Provides the account_id used by get_merchant_feed_health;
     not needed when merchant.account_id is set in the config.
     """
     from adloop.merchant.read import list_merchant_accounts as _impl
@@ -817,13 +815,11 @@ def list_accounts(limit: int = 200) -> dict:
     """List accessible Google Ads accounts.
 
     Returns account names, IDs, and status. The default cap of 200 covers
-    the vast majority of agency MCCs in one call. If the user explicitly
-    asked to see ALL of their accounts and the response comes back with
-    'truncated: true', call this tool again with a much higher limit (e.g.
-    list_accounts(limit=1000)) — do not stop at the truncated list. For
-    workflows that target a specific account you don't need to enumerate
-    at all: pass customer_id directly to get_campaign_performance,
-    run_gaql, etc.
+    the vast majority of agency MCCs in one call. When more accounts exist
+    than `limit`, the response has 'truncated: true'; a much higher limit
+    (e.g. list_accounts(limit=1000)) returns the full list. Workflows that
+    target a specific account need no enumeration at all:
+    get_campaign_performance, run_gaql, etc. take customer_id directly.
     """
     from adloop.ads.read import list_accounts as _impl
 
@@ -844,7 +840,7 @@ def get_campaign_performance(
     conversions, CPA, ROAS, CTR for each campaign.
     Date format: "YYYY-MM-DD". Empty = last 30 days.
 
-    Set compact=true for audits/overviews on large accounts: returns
+    compact=true (for audits/overviews on large accounts) returns
     account totals, status/type breakdowns, the top-10 spenders, and
     zero-conversion offenders instead of every row (~90% smaller).
     """
@@ -872,7 +868,7 @@ def get_ad_performance(
     Returns: ad type, headlines, descriptions, final URL, impressions,
     clicks, CTR, conversions, cost for each ad.
 
-    Set compact=true for audits/overviews: returns totals, the top-10
+    compact=true (for audits/overviews) returns totals, the top-10
     ads with headline/description COUNTS instead of full asset lists,
     plus incomplete-RSA and single-ad ad-group findings (~90% smaller).
     """
@@ -900,7 +896,7 @@ def get_keyword_performance(
     Returns: keyword text, match type, quality score, impressions,
     clicks, CTR, CPC, conversions for each keyword.
 
-    Set compact=true for audits/overviews: returns totals, match-type
+    compact=true (for audits/overviews) returns totals, match-type
     distribution, the top-10 spenders, low-quality-score keywords, and
     zero-conversion spenders instead of every row (~90% smaller).
     """
@@ -928,7 +924,7 @@ def get_search_terms(
     Critical for finding negative keyword opportunities and understanding user intent.
     Returns: search term, campaign, ad group, impressions, clicks, conversions.
 
-    Set compact=true for audits/overviews: returns totals, the top-10
+    compact=true (for audits/overviews) returns totals, the top-10
     terms by clicks, ready-made negative-keyword waste candidates
     (5+ clicks, zero conversions), and top converters (~90% smaller).
     """
@@ -951,7 +947,8 @@ def get_negative_keywords(
 ) -> dict:
     """List existing negative keywords for a campaign or all campaigns.
 
-    Use this before adding negative keywords to check for duplicates.
+    Shows the existing negatives, which reveals duplicates before new
+    negative keywords are added.
     If campaign_id is empty, returns negatives across all campaigns.
     """
     from adloop.ads.read import get_negative_keywords as _impl
@@ -1018,8 +1015,8 @@ def get_negative_keyword_list_campaigns(
 ) -> dict:
     """List which campaigns a shared negative keyword list is attached to.
 
-    shared_set_id: numeric ID from get_negative_keyword_lists. Omit to see
-    all list-to-campaign attachments across the account.
+    shared_set_id: numeric ID from get_negative_keyword_lists. When omitted,
+    returns all list-to-campaign attachments across the account.
     """
     from adloop.ads.read import get_negative_keyword_list_campaigns as _impl
 
@@ -1112,8 +1109,8 @@ def get_asset_performance(
     PENDING), and content (text or image URL).
 
     Note: per-asset performance labels (BEST/GOOD/LOW) are not available for
-    PMax assets in the Google Ads API. Use get_detailed_asset_performance to
-    see which asset combinations Google selects most — the closest proxy for
+    PMax assets in the Google Ads API. get_detailed_asset_performance reports
+    which asset combinations Google selects most — the closest proxy for
     individual asset quality.
 
     campaign_id: optional filter to a single PMax campaign.
@@ -1195,14 +1192,15 @@ def get_demographic_targeting(
 ) -> dict:
     """List demographic targeting criteria (age, gender, parental status, income).
 
-    Provide exactly one of `ad_group_id` or `campaign_id`. Returns each
+    Takes exactly one of `ad_group_id` or `campaign_id`. Returns each
     criterion's value, whether it's negative (excluded) or positive
     (narrowing), status, and a `remove_id` (composite resource ID) that
     can be passed directly to `remove_entity` with
     entity_type='ad_group_criterion' or 'campaign_criterion'.
 
     By default, Google Ads serves ads to ALL demographic segments — a
-    criterion only appears here once you've actively excluded or narrowed.
+    criterion only appears here once a segment has been actively excluded
+    or narrowed.
     """
     from adloop.ads.read import get_demographic_targeting as _impl
 
@@ -1322,9 +1320,9 @@ def audit_event_coverage(
 ) -> dict:
     """Three-way audit: codebase events ↔ GTM tags ↔ GA4 actual fires.
 
-    First, search the user's codebase for gtag('event', ...) and
-    dataLayer.push({event: ...}) calls and extract every distinct event name.
-    Pass that list as `expected_events`. The tool fetches the LIVE GTM
+    `expected_events` is the list of distinct event names found in the
+    codebase's gtag('event', ...) and dataLayer.push({event: ...}) calls.
+    The tool fetches the LIVE GTM
     container, joins it against GA4 event counts for the date range, and
     returns a per-event matrix with one of these statuses:
       ok                          — tag active and event firing
@@ -1368,10 +1366,9 @@ def audit_event_coverage(
 def list_gtm_accounts() -> dict:
     """List all GTM accounts the AdLoop service account / OAuth user can read.
 
-    Use this for first-time discovery before calling audit_event_coverage —
-    you need the account_id from here. If this returns an empty list, the
-    service account hasn't been added to any GTM container with at least
-    Read permission.
+    The first-time discovery step: provides the account_id that
+    audit_event_coverage takes. An empty list means the service account
+    hasn't been added to any GTM container with at least Read permission.
     """
     from adloop.gtm.read import list_accounts as _impl
 
@@ -1405,7 +1402,7 @@ def list_gtm_tags(gtm_account_id: str = "", gtm_container_id: str = "") -> dict:
 
     Each tag includes type, status, parsed parameters, the GA4 event name
     (for GA4 event tags), and resolved firing/blocking trigger names.
-    Use after audit_event_coverage to inspect specific tags.
+    Complements audit_event_coverage for inspecting specific tags.
     """
     from adloop.gtm.read import list_tags as _impl
 
@@ -1427,7 +1424,8 @@ def get_gtm_tag(
 
     Includes every parameter, firing/blocking triggers (with their filter
     conditions resolved to text), priority, pause status, sampling, and
-    monitoring metadata. Use to inspect a tag flagged by audit_event_coverage.
+    monitoring metadata. Suited to inspecting a tag flagged by
+    audit_event_coverage.
     """
     from adloop.gtm.read import get_tag as _impl
 
@@ -1449,7 +1447,7 @@ def list_gtm_triggers(gtm_account_id: str = "", gtm_container_id: str = "") -> d
     """List every trigger in the LIVE GTM container.
 
     Each trigger has its filter conditions parsed to readable text
-    (e.g. "{{Page Path}} matches RegExp ^/service-promotions/"). Use to
+    (e.g. "{{Page Path}} matches RegExp ^/service-promotions/"). Helps
     diagnose why a tag fires or doesn't fire on specific pages.
     """
     from adloop.gtm.read import list_triggers as _impl
@@ -1471,7 +1469,7 @@ def get_gtm_trigger(
     """Get the full RAW configuration for a single GTM trigger.
 
     Includes filters, auto-event filters, custom-event filters, validation
-    settings, and a list of every tag that uses this trigger. Use to
+    settings, and a list of every tag that uses this trigger. Helps
     diagnose why a tag with a specific trigger ID does or doesn't fire.
     """
     from adloop.gtm.read import get_trigger as _impl
@@ -1564,10 +1562,10 @@ def list_gtm_versions(
 ) -> dict:
     """List published GTM version history (newest first).
 
-    Version headers include version_id, name, and entity counts. Use to
-    correlate a metric drop with a recent publish: fetch versions, find
-    one with timestamps near the drop date, then call get_gtm_version
-    for full content + author info.
+    Version headers include version_id, name, and entity counts. Supports
+    correlating a metric drop with a recent publish: a version with
+    timestamps near the drop date has its full content + author info in
+    get_gtm_version.
     """
     from adloop.gtm.read import list_versions as _impl
 
@@ -1591,7 +1589,7 @@ def get_gtm_version(
     """Get full metadata + entity counts for a single GTM container version.
 
     Returns name, description, fingerprint, and lists of tag/trigger/
-    variable names at that point in time. Use after list_gtm_versions
+    variable names at that point in time. Follows list_gtm_versions
     when correlating a metric drop with a specific publish.
     """
     from adloop.gtm.read import get_version as _impl
@@ -1617,7 +1615,7 @@ def run_gaql(
 ) -> dict:
     """Execute an arbitrary GAQL (Google Ads Query Language) query.
 
-    Use this for advanced queries not covered by the other tools.
+    For queries beyond the dedicated report tools.
     Queries the Google Ads API. GAQL syntax and fields:
     https://developers.google.com/google-ads/api/docs/query/overview
 
@@ -1661,7 +1659,8 @@ def draft_campaign(
 
     Creates: CampaignBudget + Campaign (PAUSED) + AdGroup + optional Keywords
     + geo targeting + language targeting.
-    Ads are NOT included — use draft_responsive_search_ad after the campaign exists.
+    Ads are NOT included — draft_responsive_search_ad adds them once the
+    campaign exists.
 
     bidding_strategy: MAXIMIZE_CONVERSIONS | TARGET_CPA | TARGET_ROAS |
                       MAXIMIZE_CONVERSION_VALUE | TARGET_SPEND | MANUAL_CPC
@@ -1681,7 +1680,7 @@ def draft_campaign(
         Common: "1001" German, "1000" English, "1002" French, "1004" Spanish,
         "1014" Portuguese. Full list: Google Ads API language constants.
 
-    Call confirm_and_apply with the returned plan_id to execute.
+    The returned plan_id is applied with confirm_and_apply.
     """
     from adloop.ads.write import draft_campaign as _impl
 
@@ -1719,12 +1718,13 @@ def draft_ad_group(
     Creates an ad group (ENABLED, type SEARCH_STANDARD) in the specified campaign.
     Optionally includes keywords in the same atomic operation.
 
-    campaign_id: The campaign to add the ad group to (get from get_campaign_performance).
+    campaign_id: The campaign to add the ad group to (ID as returned by
+        get_campaign_performance).
     ad_group_name: Name for the new ad group.
     keywords: Optional list of {"text": "keyword", "match_type": "EXACT|PHRASE|BROAD"}.
     cpc_bid_micros: Optional ad group CPC bid in micros (only for MANUAL_CPC campaigns).
 
-    Call confirm_and_apply with the returned plan_id to execute.
+    The returned plan_id is applied with confirm_and_apply.
     """
     from adloop.ads.write import draft_ad_group as _impl
 
@@ -1756,7 +1756,7 @@ def update_campaign(
 ) -> dict:
     """Draft an update to an existing campaign — returns a PREVIEW, does NOT apply.
 
-    Only include the parameters you want to change. Omit the rest.
+    Only the parameters passed are changed; omitted ones stay as they are.
 
     campaign_id: the numeric ID of the campaign to update (required)
     bidding_strategy: MAXIMIZE_CONVERSIONS | TARGET_CPA | TARGET_ROAS |
@@ -1774,7 +1774,7 @@ def update_campaign(
     max_cpc: Maximize Clicks CPC cap when bidding_strategy is TARGET_SPEND, or
         when the existing campaign already uses TARGET_SPEND
 
-    Call confirm_and_apply with the returned plan_id to execute.
+    The returned plan_id is applied with confirm_and_apply.
     """
     from adloop.ads.write import update_campaign as _impl
 
@@ -1808,8 +1808,8 @@ def draft_responsive_search_ad(
 ) -> dict:
     """Draft a Responsive Search Ad — returns a PREVIEW, does NOT create the ad.
 
-    Provide 3-15 headlines (max 30 chars each) and 2-4 descriptions (max 90 chars each).
-    The preview shows exactly what will be created. Call confirm_and_apply to execute.
+    Takes 3-15 headlines (max 30 chars each) and 2-4 descriptions (max 90 chars each).
+    The preview shows exactly what will be created; confirm_and_apply executes it.
 
     Each headline/description entry may be either:
 
@@ -1863,7 +1863,8 @@ def update_responsive_search_ad(
     sends the ad BACK THROUGH Google policy review — Google treats the
     creative as new for optimization. URL-only and path-only edits do not
     incur this. When headlines/descriptions change, the returned preview
-    includes a ``warnings`` entry — surface it to the user before applying.
+    includes a ``warnings`` entry stating this trade-off before anything
+    is applied.
 
     Headlines/descriptions are LIST-REPLACE — when provided, the supplied
     list fully swaps in for the existing one, and Google's RSA constraints
@@ -1878,8 +1879,8 @@ def update_responsive_search_ad(
         - ``path1`` / ``path2``: empty -> no change; non-empty -> sets value
         - ``clear_path1`` / ``clear_path2``: True -> set to empty string
 
-    At least one mutation must be requested. Call confirm_and_apply with the
-    returned plan_id to execute.
+    At least one mutation must be requested. The returned plan_id is applied
+    with confirm_and_apply.
     """
     from adloop.ads.write import update_responsive_search_ad as _impl
 
@@ -1907,7 +1908,7 @@ def draft_keywords(
     """Draft keyword additions — returns a PREVIEW, does NOT add keywords.
 
     keywords: list of {"text": "keyword phrase", "match_type": "EXACT|PHRASE|BROAD"}
-    Call confirm_and_apply with the returned plan_id to execute.
+    The returned plan_id is applied with confirm_and_apply.
     """
     from adloop.ads.write import draft_keywords as _impl
 
@@ -1932,11 +1933,12 @@ def get_custom_conversion_goals(
     (`goal_config_level` CUSTOMER or CAMPAIGN and the assigned custom goal).
 
     A custom conversion goal bundles conversion actions into a named set that a
-    campaign can be pointed at. Use this before drafting: it shows which goals
+    campaign can be pointed at. Ahead of drafting, this shows which goals
     exist, which actions they contain and what a campaign currently uses.
 
     Args:
-        campaign_id: Numeric campaign ID. Omit to skip the campaign config.
+        campaign_id: Numeric campaign ID. When omitted, the campaign config
+            is skipped.
         customer_id: Ads account ID. Defaults to the configured account.
     """
     from adloop.ads.custom_conversion_goals import get_custom_conversion_goals as _impl
@@ -1969,10 +1971,10 @@ def draft_custom_conversion_goal(
 
     If a goal with the same name and exactly the same conversion actions
     already exists, nothing is planned and the result says `already_exists`
-    with that goal's ID (REMOVED goals do not count). If the name exists with
-    different actions, use draft_update_custom_conversion_goal instead.
+    with that goal's ID (REMOVED goals do not count). A name that exists with
+    different actions is changed with draft_update_custom_conversion_goal.
 
-    Call confirm_and_apply with the returned plan_id to execute.
+    The returned plan_id is applied with confirm_and_apply.
 
     Args:
         name: Name for the new goal, e.g. "OHL | Kauf + qualifizierte Anrufe".
@@ -2007,10 +2009,10 @@ def draft_update_custom_conversion_goal(
     """Rename and/or re-scope an existing custom conversion goal — PREVIEW.
 
     conversion_action_ids REPLACES the whole action list, it does not append.
-    Leave a parameter empty to keep it unchanged. The preview shows the action
+    An empty parameter stays unchanged. The preview shows the action
     list before and after.
 
-    Call confirm_and_apply with the returned plan_id to execute.
+    The returned plan_id is applied with confirm_and_apply.
 
     Args:
         custom_conversion_goal_id: Numeric goal ID from get_custom_conversion_goals.
@@ -2049,14 +2051,14 @@ def draft_assign_custom_conversion_goal(
 
     A campaign must have at least one goal configured when it switches to
     campaign level — Google answers EMPTY_CONVERSION_GOALS otherwise. That is
-    why this tool assigns a goal instead of clearing goals: use
-    draft_clear_custom_conversion_goal to go back to the account level.
+    why this tool assigns a goal instead of clearing goals;
+    draft_clear_custom_conversion_goal goes back to the account level.
 
     If the campaign already uses exactly this goal, nothing is planned and the
     result says `already_configured`. The preview carries a note that changing
     what a campaign optimises for restarts its Smart Bidding learning period.
 
-    Call confirm_and_apply with the returned plan_id to execute.
+    The returned plan_id is applied with confirm_and_apply.
 
     Args:
         campaign_id: Numeric campaign ID to configure.
@@ -2089,7 +2091,7 @@ def draft_clear_custom_conversion_goal(
     draft_assign_custom_conversion_goal. The account-level goals themselves are
     not touched.
 
-    Call confirm_and_apply with the returned plan_id to execute.
+    The returned plan_id is applied with confirm_and_apply.
 
     Args:
         campaign_id: Numeric campaign ID to reset.
@@ -2116,7 +2118,7 @@ def add_negative_keywords(
 
     Negative keywords prevent your ads from showing for irrelevant searches.
     match_type: "EXACT", "PHRASE", or "BROAD"
-    Call confirm_and_apply with the returned plan_id to execute.
+    The returned plan_id is applied with confirm_and_apply.
     """
     from adloop.ads.write import add_negative_keywords as _impl
 
@@ -2138,10 +2140,10 @@ def add_negative_locations(
 ) -> dict:
     """Draft negative geo location additions — returns a PREVIEW.
 
-    Use this to exclude cities/regions from a campaign while keeping broader
-    positive targets such as State of Sao Paulo. geo_target_ids are numeric
-    Google geo target constant IDs. Call confirm_and_apply with the returned
-    plan_id to execute.
+    Excludes cities/regions from a campaign while keeping broader positive
+    targets such as State of Sao Paulo. geo_target_ids are numeric Google
+    geo target constant IDs. The returned plan_id is applied with
+    confirm_and_apply.
     """
     from adloop.ads.write import add_negative_locations as _impl
 
@@ -2171,7 +2173,7 @@ def propose_negative_keyword_list(
     Creates a reusable negative keyword list that can later be applied to multiple
     campaigns, unlike add_negative_keywords which adds directly to one campaign.
     match_type: "EXACT", "PHRASE", or "BROAD"
-    Call confirm_and_apply with the returned plan_id to execute.
+    The returned plan_id is applied with confirm_and_apply.
     """
     from adloop.ads.write import propose_negative_keyword_list as _impl
 
@@ -2199,8 +2201,8 @@ def add_to_negative_keyword_list(
 ) -> dict:
     """Append keywords to an EXISTING shared negative keyword list — returns a PREVIEW.
 
-    Use this when a suitable list already exists and only needs more keywords
-    (instead of propose_negative_keyword_list, which creates a new list).
+    For a suitable list that already exists and only needs more keywords
+    (propose_negative_keyword_list creates a new list instead).
     The shared_set_id comes from get_negative_keyword_lists;
     get_negative_keyword_list_keywords shows the terms already in a list.
 
@@ -2209,7 +2211,7 @@ def add_to_negative_keyword_list(
         are collapsed).
     match_type: "EXACT", "PHRASE", or "BROAD"
 
-    Call confirm_and_apply with the returned plan_id to execute.
+    The returned plan_id is applied with confirm_and_apply.
     """
     from adloop.ads.write import add_to_negative_keyword_list as _impl
 
@@ -2235,13 +2237,13 @@ def attach_shared_set_to_campaigns(
     set's criteria (e.g. negative keywords). Most commonly used to attach a
     shared negative keyword list to newly-built campaigns.
 
-    Use ``get_negative_keyword_lists`` to find the shared_set_id, and
-    ``get_negative_keyword_list_campaigns`` to inspect existing attachments.
+    The shared_set_id comes from ``get_negative_keyword_lists``;
+    ``get_negative_keyword_list_campaigns`` lists existing attachments.
 
     shared_set_id: numeric ID from get_negative_keyword_lists.
     campaign_ids: list of numeric campaign IDs to attach the set to.
 
-    Call confirm_and_apply with the returned plan_id to execute.
+    The returned plan_id is applied with confirm_and_apply.
     """
     from adloop.ads.write import attach_shared_set_to_campaigns as _impl
 
@@ -2266,13 +2268,12 @@ def detach_shared_set_from_campaigns(
     shared set's criteria. The shared set itself is unchanged; only the
     per-campaign attachment is removed.
 
-    Use ``get_negative_keyword_list_campaigns`` to inspect existing attachments
-    before detaching.
+    ``get_negative_keyword_list_campaigns`` lists the existing attachments.
 
     shared_set_id: numeric ID from get_negative_keyword_lists.
     campaign_ids: list of numeric campaign IDs to detach the set from.
 
-    Call confirm_and_apply with the returned plan_id to execute.
+    The returned plan_id is applied with confirm_and_apply.
     """
     from adloop.ads.write import detach_shared_set_from_campaigns as _impl
 
@@ -2298,12 +2299,12 @@ def get_ai_max_settings(
     campaign also carries its non-REMOVED ad groups with
     ad_group.ai_max_ad_group_setting.disable_search_term_matching.
 
-    Use this before draft_ai_max_settings to see the current state, and after
-    confirm_and_apply to verify what the account actually looks like.
+    Shows the current state ahead of draft_ai_max_settings, and what the
+    account actually looks like after confirm_and_apply.
 
     Args:
-        campaign_id: Numeric campaign ID. Omit to list every non-removed
-            Search campaign in the account.
+        campaign_id: Numeric campaign ID. When omitted, every non-removed
+            Search campaign in the account is listed.
         customer_id: Ads account ID. Defaults to the configured account.
     """
     from adloop.ads.ai_max import get_ai_max_settings as _impl
@@ -2333,7 +2334,7 @@ def draft_ai_max_settings(
     advertising channel, brand lists can only be applied to exclusive
     targeting, broad match campaigns for inclusive targeting or PMax generated
     campaigns"). Turning AI Max on while leaving its automations running is the
-    trap — plan both together. An automation the caller never mentioned is
+    trap, so both belong to the same plan. An automation the caller never mentioned is
     refused outright (the plan says which switch to pass); one named explicitly
     (disable_search_term_matching=False, text_asset_automation="OPTED_IN") is
     planned with requires_double_confirm=True, because switching to AI Max with
@@ -2345,11 +2346,11 @@ def draft_ai_max_settings(
 
     Args:
         campaign_id: Numeric ID of the Search campaign to prepare.
-        enable_ai_max: Set campaign.ai_max_setting.enable_ai_max. Omit to leave
-            it untouched.
-        disable_search_term_matching: Set
+        enable_ai_max: Value for campaign.ai_max_setting.enable_ai_max. When
+            omitted, it stays untouched.
+        disable_search_term_matching: Value for
             ad_group.ai_max_ad_group_setting.disable_search_term_matching on the
-            selected ad groups. Omit to leave them untouched.
+            selected ad groups. When omitted, they stay untouched.
         ad_group_ids: Explicit ad group IDs. Empty means every non-removed ad
             group of the campaign.
         include_paused_ad_groups: Default true — paused groups are set as well,
@@ -2362,7 +2363,7 @@ def draft_ai_max_settings(
             final URL expansion).
         customer_id: Ads account ID. Defaults to the configured account.
 
-    Call confirm_and_apply with the returned plan_id to execute.
+    The returned plan_id is applied with confirm_and_apply.
     """
     from adloop.ads.write import draft_ai_max_settings as _impl
 
@@ -2404,7 +2405,7 @@ def draft_prepare_brand_exclusions(
     is attached — attaching stays a separate step with propose_brand_list /
     attach_brand_list_to_campaigns once this state is verified in the account.
 
-    Call confirm_and_apply with the returned plan_id to execute.
+    The returned plan_id is applied with confirm_and_apply.
 
     Args:
         campaign_id: Numeric ID of the Search campaign to prepare.
@@ -2444,20 +2445,20 @@ def draft_demographic_targeting(
     criteria that EXCLUDE a segment (negative=True, default) or NARROW
     targeting to it (negative=False — uncommon).
 
-    Provide exactly one of `ad_group_id` or `campaign_id`. At least one of
+    Takes exactly one of `ad_group_id` or `campaign_id`. At least one of
     the four demographic lists must contain a value.
 
     Accepted values:
     - age_ranges: '18-24', '25-34', '35-44', '45-54', '55-64', '65+'.
-      Google's buckets are FIXED — 'Exclude 23-35' has no exact mapping;
-      ask the user which buckets to use.
+      Google's buckets are FIXED — 'Exclude 23-35' has no exact mapping
+      and needs a choice of buckets.
     - genders: 'female', 'male', 'undetermined'
     - parental_statuses: 'parent', 'not_a_parent', 'undetermined'
     - income_ranges: PERCENTILES (not currency). 'top-10', '11-20', '21-30',
       '31-40', '41-50', 'lower-50', 'undetermined'. Available in select
       countries only (US, AU, JP, etc.).
 
-    Call confirm_and_apply with the returned plan_id to execute.
+    The returned plan_id is applied with confirm_and_apply.
     """
     from adloop.ads.write import draft_demographic_targeting as _impl
 
@@ -2540,7 +2541,7 @@ def draft_image_assets(
 ) -> dict:
     """Draft campaign image assets from local files or public image URLs — returns a PREVIEW.
 
-    Pass at least one image in total across image_paths and image_urls.
+    At least one image in total is required across image_paths and image_urls.
     Images must be PNG, JPEG or GIF and at most 5120 KB (Google's limit).
     URL images are downloaded now and checked; applying re-downloads them
     and refuses if the image changed since the preview.
@@ -2548,7 +2549,8 @@ def draft_image_assets(
     Args:
         campaign_id: Numeric ID of the campaign to attach the images to.
         image_paths: Local PNG/JPEG/GIF file paths on the machine running
-            AdLoop. Not available on a hosted server — use image_urls there.
+            AdLoop. Not available on a hosted server, where image_urls
+            applies instead.
         image_urls: Public http(s) URLs of PNG/JPEG/GIF images. Links to
             private, local or internal addresses are refused.
         customer_id: Ads account ID. Defaults to the configured account.
@@ -2580,7 +2582,7 @@ def pause_entity(
       - ad: "adGroupId~adId" (e.g. "12345678~987654")
       - keyword: "adGroupId~criterionId" (e.g. "12345678~987654")
 
-    Call confirm_and_apply with the returned plan_id to execute.
+    The returned plan_id is applied with confirm_and_apply.
     """
     from adloop.ads.write import pause_entity as _impl
 
@@ -2608,7 +2610,7 @@ def enable_entity(
       - ad: "adGroupId~adId" (e.g. "12345678~987654")
       - keyword: "adGroupId~criterionId" (e.g. "12345678~987654")
 
-    Call confirm_and_apply with the returned plan_id to execute.
+    The returned plan_id is applied with confirm_and_apply.
     """
     from adloop.ads.write import enable_entity as _impl
 
@@ -2634,17 +2636,17 @@ def remove_entity(
     entity_id: The resource ID.
                For keywords: "adGroupId~criterionId"
                For negative_keywords: "campaignId~criterionId"
-                   (use the resource_id field from get_negative_keywords)
+                   (the resource_id field from get_negative_keywords)
                For shared_criterion: "sharedSetId~criterionId"
-                   (use the resource_id field from get_negative_keyword_list_keywords)
+                   (the resource_id field from get_negative_keyword_list_keywords)
                For campaign_asset: "campaignId~assetId~fieldType"
                For asset: simple asset ID
                For customer_asset: "assetId~fieldType"
 
-    WARNING: Removed entities cannot be re-enabled. Use pause_entity instead
-    if you just want to temporarily disable something.
+    WARNING: Removed entities cannot be re-enabled. pause_entity is the
+    reversible way to temporarily disable something.
 
-    Call confirm_and_apply with the returned plan_id to execute.
+    The returned plan_id is applied with confirm_and_apply.
     """
     from adloop.ads.write import remove_entity as _impl
 
@@ -2677,7 +2679,7 @@ def draft_sitelinks(
 
     Google recommends at least 4 sitelinks per campaign. Fewer than 2 may not show.
 
-    Call confirm_and_apply with the returned plan_id to execute.
+    The returned plan_id is applied with confirm_and_apply.
     """
     from adloop.ads.write import draft_sitelinks as _impl
 
@@ -2697,21 +2699,22 @@ def confirm_and_apply(
 ) -> dict:
     """Execute a previously previewed change.
 
-    IMPORTANT: Defaults to dry_run=True. You MUST explicitly pass dry_run=false
-    to make real changes to the ad account (Google Ads or Reddit Ads — the
-    plan knows which platform it targets).
+    IMPORTANT: Defaults to dry_run=True (validate only). Only an explicit
+    dry_run=false applies the change to the ad account (Google Ads or Reddit
+    Ads — the plan knows which platform it targets).
 
     Forced dry runs: when real changes are switched off (live changes off
     for the workspace in AdLoop Cloud, or safety.require_dry_run in a
     self-hosted config), dry_run=false is IGNORED and the result is still
     DRY_RUN_SUCCESS, with 'dry_run_forced_by' and 'remediation' fields.
-    Pass the remediation on to the user and stop retrying: calling again
-    with dry_run=false changes nothing until that setting is changed.
+    'remediation' says how the user switches that setting; until it is
+    changed, repeated calls with dry_run=false change nothing.
 
     Two-phase apply: if 'safety.two_phase_apply: true' is set (always on
     for AdLoop Cloud tenants), dry_run=false is REFUSED with status
     DRY_RUN_REQUIRED until this plan_id has completed one dry_run=true
-    pass. Run the dry run, show it to the user, then apply for real.
+    pass. The sequence is: dry run, review of its result, then the real
+    apply.
 
     Google Ads plans: the dry run sends the exact mutates to Google with
     validate_only=True, so Google checks the change and executes nothing
@@ -2747,8 +2750,8 @@ def _reddit_account(ad_account_id: str) -> str:
 def list_reddit_accounts() -> dict:
     """List Reddit businesses and ad accounts the connected Reddit user can access.
 
-    Call first to discover ad_account_id values (plus currency, time zone and
-    approval state) for every other Reddit tool. Requires the Reddit Ads
+    Provides the ad_account_id values (plus currency, time zone and approval
+    state) that every other Reddit tool takes. Requires the Reddit Ads
     connection (adloop init → Reddit step, or Settings → Reddit Ads in Cloud).
     """
     from adloop.reddit.read import list_reddit_accounts as _impl
@@ -2776,7 +2779,7 @@ def list_reddit_funding_instruments(ad_account_id: str = "") -> dict:
 def get_reddit_campaigns(ad_account_id: str = "", include_archived: bool = False) -> dict:
     """List Reddit campaigns with status, objective, budget mode and bids.
 
-    Returns configured_status (what you set) and effective_status (what Reddit
+    Returns configured_status (what was set) and effective_status (what Reddit
     computes: PENDING_APPROVAL, REJECTED, PENDING_BILLING_INFO, ...). Money is
     in account currency. Budgets live on ad groups unless
     is_campaign_budget_optimization is true.
@@ -2910,7 +2913,7 @@ def run_reddit_report(
 def get_reddit_pixels(ad_account_id: str = "") -> dict:
     """Reddit pixels of the account and when each event (purchase, sign_up, lead, ...) last fired.
 
-    Run before conversion-optimized campaigns: insights flag pixels that never
+    Relevant before conversion-optimized campaigns: insights flag pixels that never
     fired and ad groups optimizing for an event their pixel has never sent.
     Every new ad group needs a conversion_pixel_id from here.
     """
@@ -2997,8 +3000,8 @@ def estimate_reddit_ad_group(
 ) -> dict:
     """Audience size, delivery estimate and Reddit's suggested bid for a planned ad group — read-only.
 
-    Reddit's counterpart of estimate_budget: run it before draft_reddit_ad_group
-    with the same targeting and budget. Returns the reachable and targetable
+    Reddit's counterpart of estimate_budget: takes the same targeting and
+    budget as draft_reddit_ad_group, ahead of drafting. Returns the reachable and targetable
     audience (fixed 30-day basis), estimated impressions/clicks/reach for the
     schedule (default: tomorrow for 30 days), and the minimum/suggested
     bid range for bid_type in account currency. Nothing is created.
@@ -3040,7 +3043,7 @@ def pause_reddit_entity(
     """Draft pausing a Reddit campaign, ad group or ad — returns a PREVIEW.
 
     entity_type: "campaign", "ad_group" or "ad"; entity_id from the read tools.
-    Call confirm_and_apply with the returned plan_id to execute.
+    The returned plan_id is applied with confirm_and_apply.
     """
     from adloop.reddit.write import pause_reddit_entity as _impl
 
@@ -3060,7 +3063,7 @@ def enable_reddit_entity(
     """Draft enabling (configured_status=ACTIVE) a Reddit campaign, ad group or ad — PREVIEW.
 
     Enabling a new ad sends it to Reddit policy review (PENDING_APPROVAL).
-    Call confirm_and_apply with the returned plan_id to execute.
+    The returned plan_id is applied with confirm_and_apply.
     """
     from adloop.reddit.write import enable_reddit_entity as _impl
 
@@ -3080,8 +3083,9 @@ def remove_reddit_entity(
     """Draft ARCHIVING a Reddit campaign, ad group or ad — irreversible, PREVIEW.
 
     Reddit has no hard delete for entities that ran; ARCHIVED is permanent.
-    Prefer pause_reddit_entity unless the user explicitly wants it gone.
-    Requires double confirmation. Call confirm_and_apply to execute.
+    pause_reddit_entity is the reversible alternative when the entity does
+    not need to be gone. Requires double confirmation; confirm_and_apply
+    executes it.
     """
     from adloop.reddit.write import remove_reddit_entity as _impl
 
@@ -3113,7 +3117,7 @@ def update_reddit_campaign(
 
     daily_budget / lifetime_budget / bid_* apply only when the campaign uses
     campaign budget optimization; otherwise the budget lives on its ad groups
-    (use update_reddit_ad_group). Budgets are in account currency and checked
+    (changed via update_reddit_ad_group). Budgets are in account currency and checked
     against max_daily_budget. The preview shows old → new per field.
     schedule: weekly delivery windows ("time of day" in Ads Manager), a list
     of blocks like {"days": "MON-FRI", "start_hour": 13, "end_hour": 23}
@@ -3172,8 +3176,8 @@ def update_reddit_ad_group(
 
     Budget (daily_budget or lifetime_budget + end_time) is checked against
     max_daily_budget; bid_value against max_bid_increase_pct. Targeting lists
-    REPLACE the current value of each key you pass (pass the full list);
-    keys you omit are preserved. Ids/names come from search_reddit_targeting.
+    REPLACE the current value of each key passed (each takes the full list);
+    omitted keys are preserved. Ids/names come from search_reddit_targeting.
     schedule: weekly delivery windows ("time of day" in Ads Manager), a list
     of blocks like {"days": "MON-FRI", "start_hour": 13, "end_hour": 23}
     (day names, hours 0-23, end_hour inclusive) or the native
@@ -3224,8 +3228,8 @@ def update_reddit_ad(
     """Draft changes to a Reddit ad — name, landing URL (click_url), comments on/off.
 
     click_url is verified to be reachable. The headline and body of a live
-    Reddit post cannot be edited; for new copy use draft_reddit_ad and pause
-    the old ad. Preview shows old → new; confirm_and_apply executes.
+    Reddit post cannot be edited; new copy means a new ad via draft_reddit_ad,
+    with the old ad paused. Preview shows old → new; confirm_and_apply executes.
     """
     from adloop.reddit.write import update_reddit_ad as _impl
 
@@ -3264,10 +3268,11 @@ def draft_reddit_campaign(
     objective: CLICKS, CONVERSIONS, IMPRESSIONS, LEAD_GENERATION, APP_INSTALLS,
     CATALOG_SALES or VIDEO_VIEWABLE_IMPRESSIONS. funding_instrument_id from
     list_reddit_funding_instruments. By default the budget lives on the ad
-    groups; set campaign_budget_optimization=true to hold it on the campaign
+    groups; campaign_budget_optimization=true holds it on the campaign
     (then daily_budget or lifetime_budget, bid_strategy, bid_type and
     conversion_pixel_id are required). Budgets are checked against
-    max_daily_budget. Times are ISO 8601. Follow up with draft_reddit_ad_group.
+    max_daily_budget. Times are ISO 8601. Ad groups are added with
+    draft_reddit_ad_group.
     schedule: weekly delivery windows ("time of day" in Ads Manager), a list
     of blocks like {"days": "MON-FRI", "start_hour": 13, "end_hour": 23}
     (day names, hours 0-23, end_hour inclusive) or the native
@@ -3343,7 +3348,7 @@ def draft_reddit_ad_group(
     of blocks like {"days": "MON-FRI", "start_hour": 13, "end_hour": 23}
     (day names, hours 0-23, end_hour inclusive) or the native
     {"start_day": "FRI", "start_hour": 22, "end_day": "SAT", "end_hour": 3}.
-    Omit for delivery at any time. Hours apply in each viewer's local time,
+    Omitted means delivery at any time. Hours apply in each viewer's local time,
     not the account time zone.
     locations: placements, FEED and/or COMMENTS_PAGE (conversation pages).
     """
@@ -3400,10 +3405,10 @@ def draft_reddit_ad(
 
     profile_id from list_reddit_funding_instruments (profiles). post_type TEXT
     (headline + optional body) or IMAGE (headline + public image_url).
-    click_url is verified to be reachable before drafting — never point ads
-    at unverified pages. call_to_action is one of Reddit's fixed labels
+    click_url is verified to be reachable before drafting, so ads do not
+    point at unverified pages. call_to_action is one of Reddit's fixed labels
     (Learn More, Sign Up, Shop Now, Download, ...). Comments are public on
-    Reddit ads; pass allow_comments=false to disable them.
+    Reddit ads; allow_comments=false disables them.
 
     post_id (t3_...) promotes an EXISTING post instead, keeping its upvotes
     and comments: no post is created, headline/body/image are ignored, and
@@ -3447,8 +3452,8 @@ def draft_key_event(
     The fix for "the event fires but isn't tracked as a conversion":
     attribution_check / validate_tracking diagnose it, this closes the
     loop. counting_method: ONCE_PER_EVENT (purchases) or ONCE_PER_SESSION
-    (sign-ups). Call confirm_and_apply with the returned plan_id to
-    execute. Applies to future data only.
+    (sign-ups). The returned plan_id is applied with confirm_and_apply.
+    Applies to future data only.
     """
     from adloop.ga4.write import draft_key_event as _impl
 
@@ -3487,8 +3492,8 @@ def draft_create_conversion_action(
     A positive default_value with always_use_default_value=False is a legal
     "fallback" config — the preview warns but does NOT flip the flag.
     include_in_conversions_metric is IMMUTABLE on create (change it later via
-    draft_update_conversion_action). Call confirm_and_apply with the returned
-    plan_id to execute.
+    draft_update_conversion_action). The returned plan_id is applied with
+    confirm_and_apply.
     """
     from adloop.ads.conversion_actions import (
         draft_create_conversion_action as _impl,
@@ -3532,11 +3537,12 @@ def draft_update_conversion_action(
 ) -> dict:
     """Draft a partial UPDATE of an existing ConversionAction — returns PREVIEW.
 
-    Only the parameters you pass non-empty/non-default are sent to the API.
-    Use to rename, demote a Primary to Secondary, change value, adjust the
-    call-duration threshold, or change attribution. Find the ID via:
-    SELECT conversion_action.id, conversion_action.name FROM conversion_action.
-    Call confirm_and_apply with the returned plan_id to execute.
+    Only parameters passed non-empty/non-default are sent to the API.
+    Covers renaming, demoting a Primary to Secondary, changing value,
+    adjusting the call-duration threshold, or changing attribution. The ID
+    comes from: SELECT conversion_action.id, conversion_action.name FROM
+    conversion_action.
+    The returned plan_id is applied with confirm_and_apply.
     """
     from adloop.ads.conversion_actions import (
         draft_update_conversion_action as _impl,
@@ -3570,8 +3576,8 @@ def draft_remove_conversion_action(
 
     Removal stops counting and drops the action from goal lists; historical
     data is preserved but the action is irreversible. SMART_CAMPAIGN_* and
-    GOOGLE_HOSTED types reject removal with MUTATE_NOT_ALLOWED. Call
-    confirm_and_apply with the returned plan_id to execute.
+    GOOGLE_HOSTED types reject removal with MUTATE_NOT_ALLOWED. The returned
+    plan_id is applied with confirm_and_apply.
     """
     from adloop.ads.conversion_actions import (
         draft_remove_conversion_action as _impl,
@@ -3594,9 +3600,8 @@ def validate_tracking(
 ) -> dict:
     """Compare tracking events found in the codebase against actual GA4 data.
 
-    First, search the user's codebase for gtag('event', ...) or dataLayer.push
-    calls and extract event names. Then pass those names here to check which
-    ones actually fire in GA4.
+    Takes the event names found in the codebase's gtag('event', ...) or
+    dataLayer.push calls and checks which ones actually fire in GA4.
 
     Returns: matched events, events missing from GA4, unexpected GA4 events,
     and auto-collected events (page_view, session_start, etc.).
@@ -3698,13 +3703,13 @@ def discover_keywords(
     """Discover new keyword ideas using Google Ads Keyword Planner.
 
     Mirrors the "Discover new keywords" UI in Keyword Planner:
-    - Start with keywords: pass seed_keywords (e.g. ["running shoes"])
-    - Start with a website: pass url (e.g. "https://example.com/products")
-
-    Set include_monthly_volumes=true for per-month search history (last 24
-    months, top-20 ideas) plus a seasonality insight — use when the user
-    asks about demand trends, seasonality, or "when should I ramp budget".
+    - Start with keywords: seed_keywords (e.g. ["running shoes"])
+    - Start with a website: url (e.g. "https://example.com/products")
     - Both together: keywords + url for more targeted ideas
+
+    include_monthly_volumes=true adds per-month search history (last 24
+    months, top-20 ideas) plus a seasonality insight — relevant to questions
+    about demand trends, seasonality, or "when should I ramp budget".
 
     Returns keyword ideas sorted by avg monthly search volume, with
     competition level (LOW/MEDIUM/HIGH) and top-of-page bid range.
@@ -3742,13 +3747,13 @@ def suggest_brands(
     """Resolve a brand name to the brands Google recognizes for it.
 
     Mirrors the brand picker in the Google Ads UI
-    (BrandSuggestionService.SuggestBrands): pass a free-text name such as
-    "EscapeGame München" or "NoWayOut" and get back the matching brands with
+    (BrandSuggestionService.SuggestBrands): takes a free-text name such as
+    "EscapeGame München" or "NoWayOut" and returns the matching brands with
     their ID, display name, state, and associated URLs.
 
     The returned brand ID is the Commercial Knowledge Graph ID. Brand
     criteria — brand lists, brand exclusions — target that ID, not a display
-    name, so resolve the name here before building any brand list.
+    name, so a name is resolved here before it can go into a brand list.
 
     selected_brand_ids: IDs already picked, handed back so Google keeps them
     in the suggestion set while the prefix narrows. Optional.
@@ -3788,7 +3793,7 @@ def check_brand_names(
     not a guarantee.
 
     At most 25 names per call — the API resolves one prefix per request, so
-    split longer lists.
+    longer lists take several calls.
 
     Args:
         brand_names: The names to triage, at most 25 per call.
@@ -3860,8 +3865,8 @@ def get_brand_list_campaigns(
     restricts targeting to the list.
 
     Args:
-        shared_set_id: Numeric list ID from get_brand_lists. Omit to see all
-            brand-list attachments in the account.
+        shared_set_id: Numeric list ID from get_brand_lists. When omitted,
+            all brand-list attachments in the account are returned.
         customer_id: Ads account ID. Defaults to the configured account.
     """
     from adloop.ads.brands import get_brand_list_campaigns as _impl
@@ -3886,15 +3891,15 @@ def propose_brand_list(
     Creates a SharedSet of type BRANDS, fills it with brands, and — when
     campaign_ids is given — attaches it to those campaigns.
 
-    Call confirm_and_apply with the returned plan_id to execute.
+    The returned plan_id is applied with confirm_and_apply.
 
     Args:
         list_name: Name for the new list, as it should appear in Google Ads.
         brand_ids: Commercial Knowledge Graph MIDs — the `id` field from
-            suggest_brands / check_brand_names. Resolve names there first; a
+            suggest_brands / check_brand_names, which resolve names; a
             display name alone cannot be written.
-        campaign_ids: Optional. Omit to create the list without using it yet,
-            then attach later with attach_brand_list_to_campaigns.
+        campaign_ids: Optional. When omitted, the list is created without
+            being used yet; attach_brand_list_to_campaigns attaches it later.
         negative: True (default) excludes the brands from those campaigns;
             False restricts targeting to them instead.
         customer_id: Ads account ID. Defaults to the configured account.
@@ -3919,12 +3924,12 @@ def add_to_brand_list(
 ) -> dict:
     """Append brands to an EXISTING brand list — returns a PREVIEW.
 
-    Use this when the list already exists and only needs more brands (instead
-    of propose_brand_list, which creates a new list). Call get_brand_lists for
-    the shared_set_id and get_brand_list_brands first to avoid adding a brand
-    twice.
+    For a list that already exists and only needs more brands
+    (propose_brand_list creates a new list instead). The shared_set_id comes
+    from get_brand_lists; get_brand_list_brands shows the brands already in
+    the list, which makes a brand that would be added twice visible.
 
-    Call confirm_and_apply with the returned plan_id to execute.
+    The returned plan_id is applied with confirm_and_apply.
 
     Args:
         shared_set_id: Numeric list ID from get_brand_lists.
@@ -3953,7 +3958,7 @@ def remove_from_brand_list(
     brand out of a list — there is nothing to pause. Removing a brand does not
     detach the list from any campaign.
 
-    Call confirm_and_apply with the returned plan_id to execute.
+    The returned plan_id is applied with confirm_and_apply.
 
     Args:
         shared_set_id: Numeric list ID from get_brand_lists.
@@ -3985,10 +3990,10 @@ def attach_brand_list_to_campaigns(
     criteria, and `negative` decides the role: True excludes the brands
     (default), False restricts targeting to the list.
 
-    Use get_brand_lists for the shared_set_id and get_brand_list_campaigns to
-    inspect existing attachments before attaching.
+    The shared_set_id comes from get_brand_lists; get_brand_list_campaigns
+    lists existing attachments.
 
-    Call confirm_and_apply with the returned plan_id to execute.
+    The returned plan_id is applied with confirm_and_apply.
 
     Args:
         shared_set_id: Numeric list ID from get_brand_lists.
@@ -4021,9 +4026,9 @@ def detach_brand_list_from_campaigns(
     list are reported as `not_attached` in the apply result instead of
     failing the batch.
 
-    Use get_brand_list_campaigns to inspect existing attachments first.
+    get_brand_list_campaigns lists the existing attachments.
 
-    Call confirm_and_apply with the returned plan_id to execute.
+    The returned plan_id is applied with confirm_and_apply.
 
     Args:
         shared_set_id: Numeric list ID from get_brand_lists.

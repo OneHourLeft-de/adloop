@@ -167,10 +167,12 @@ class TestOrchestrationInstructions:
         assert "geo" in text.lower()
         assert "language" in text.lower()
 
-    def test_instructions_point_at_full_ruleset(self):
+    def test_instructions_point_at_no_outside_rules_files(self):
+        # Connector directories reject references to external instruction
+        # sources; the rules files stay documented in the README instead.
         text = _build_orchestration_instructions()
-        # The hint should tell the model where the full rules live.
-        assert "install-rules" in text or "adloop.mdc" in text or "CLAUDE.md" in text
+        for reference in (".mdc", "CLAUDE.md", "install-rules", "rules file"):
+            assert reference not in text, reference
 
     def test_instructions_are_compact_not_full_rules(self):
         # Spec describes `instructions` as a "hint" — not a manual.
@@ -179,7 +181,7 @@ class TestOrchestrationInstructions:
         text = _build_orchestration_instructions()
         assert len(text) < 5_000, (
             f"instructions field is {len(text)} bytes — should be a compact "
-            f"hint (<5KB). For full rules use install-rules."
+            f"hint (<5KB)."
         )
 
     def test_instructions_are_attached_to_mcp_server(self):
@@ -485,6 +487,42 @@ class TestDirectoryReadiness:
         assert "Args:" not in tool.description
         assert "description" in tool.parameters["properties"]["campaign_id"]
 
+    # Phrasings that instruct the model instead of documenting the tool.
+    # Directory policy: descriptions carry no instructions about model
+    # behavior, other tools, or external instruction sources.
+    _DIRECTIVE_PATTERNS = (
+        r"\byou must\b",
+        r"\byou need\b",
+        r"\bcall (this tool|it|[a-z_]+) (again|first)\b",
+        # A sentence opening with "Call <tool>" (not "gtag call in ...").
+        r"(\A|[.:;!]\s+|\n\s*\n)\s*call [a-z_]+",
+        r"\bcall [a-z_]+ (to|with|for)\b",
+        r"\brun this first\b",
+        r"\brun (it|this) before\b",
+        r"\bdo not stop\b",
+        r"\bstop retrying\b",
+        r"\balways call\b",
+        r"\bshow (it|the preview) to the user\b",
+        r"\bsurface (it|those|them)\b",
+        r"\buse this (tool )?(for|when|before|after|to|as)\b",
+        r"\buse (to|after|on)\b",
+        r"\bask the user\b",
+        r"\bnever point\b",
+        r"\bprefer [a-z_]+ unless\b",
+        r"\bfollow up with\b",
+        r"cursor rules",
+        r"\.mdc\b",
+        r"claude\.md",
+        r"install-rules",
+    )
+
+    @staticmethod
+    def _described_texts(tool):
+        """The tool description plus every parameter description it exposes."""
+        yield "description", tool.description or ""
+        for name, prop in (tool.parameters.get("properties") or {}).items():
+            yield f"param {name}", prop.get("description") or ""
+
     @pytest.mark.asyncio
     async def test_descriptions_point_at_no_outside_instructions(self):
         from adloop.server import mcp
@@ -493,3 +531,47 @@ class TestDirectoryReadiness:
             text = (tool.description or "").lower()
             assert "cursor rules" not in text, tool.name
             assert "always call" not in text, tool.name
+
+    @pytest.mark.asyncio
+    async def test_descriptions_document_instead_of_instruct(self):
+        import re
+
+        from adloop.server import mcp
+
+        offenders = []
+        for tool in await mcp.list_tools():
+            for where, text in self._described_texts(tool):
+                for pattern in self._DIRECTIVE_PATTERNS:
+                    match = re.search(pattern, text, re.IGNORECASE)
+                    if match:
+                        offenders.append(f"{tool.name} ({where}): {match.group(0)!r}")
+        assert not offenders, "\n".join(offenders)
+
+    def test_directive_patterns_catch_the_phrasings_they_target(self):
+        import re
+
+        for phrase in (
+            "You MUST explicitly pass dry_run=false",
+            "call this tool again with a much higher limit",
+            "Call confirm_and_apply with the returned plan_id to execute.",
+            "Run this first if other tools are failing.",
+            "do not stop at the truncated list",
+            "Pass the remediation on to the user and stop retrying",
+            "Always call health_check",
+            "Run the dry run, show it to the user, then apply.",
+            "surface those verbatim",
+            "Use this for advanced queries not covered by the other tools.",
+            "never point ads at unverified pages",
+            "the full ruleset lives in `.cursor/rules/adloop.mdc`",
+            "or `~/.claude/CLAUDE.md`",
+        ):
+            assert any(
+                re.search(p, phrase, re.IGNORECASE)
+                for p in self._DIRECTIVE_PATTERNS
+            ), phrase
+
+    def test_server_instructions_reference_no_outside_rules_files(self):
+        from adloop.server import mcp
+
+        for reference in (".mdc", "CLAUDE.md", "install-rules"):
+            assert reference not in mcp.instructions, reference
