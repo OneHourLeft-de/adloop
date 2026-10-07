@@ -2990,6 +2990,60 @@ class TestTimestampsAndTimeZones:
         assert row["call_start_time"] == "2026-03-01 12:00:00+01:00"
         assert row["conversion_time"] == "2026-03-01 13:30:00+01:00"
 
+    def test_a_24_hour_slash_timestamp_is_accepted(
+        self, config, tmp_path, monkeypatch
+    ):
+        """Google documents `MM/dd/yyyy HH:mm:ss` — accept it next to AM/PM."""
+        result = self._call_draft(
+            config, tmp_path, monkeypatch,
+            "Parameters:TimeZone=Europe/Berlin,,,,,\n"
+            + _CALL_HEADER + self._row("3/1/2026 13:30:00", "3/1/2026 14:00:00"),
+        )
+        row = _stored_plan(result).apply_only_payload["rows"][0]
+
+        assert row["call_start_time"] == "2026-03-01 13:30:00+01:00"
+        assert row["conversion_time"] == "2026-03-01 14:00:00+01:00"
+
+    def test_a_bare_date_says_that_midnight_was_assumed(
+        self, config, tmp_path, monkeypatch
+    ):
+        result = self._call_draft(
+            config, tmp_path, monkeypatch,
+            "Parameters:TimeZone=Europe/Berlin,,,,,\n"
+            + _CALL_HEADER + self._row("2026-03-01", "2026-03-01"),
+        )
+        plan = _stored_plan(result)
+        row = plan.apply_only_payload["rows"][0]
+
+        # The row goes through (Google accepts midnight), but it is not silent
+        # about the assumption.
+        assert row["call_start_time"] == "2026-03-01 00:00:00+01:00"
+        warnings = " ".join(plan.changes["parse_warnings"])
+        assert warnings.count("midnight was assumed") == 2  # both time columns
+        # Line 1 is the Parameters row, line 2 the header, so the row is line 3.
+        assert "Row 3" in warnings
+
+    def test_an_ec_row_without_a_time_says_the_same(
+        self, config, tmp_path, monkeypatch
+    ):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CLICKS")
+        path = tmp_path / "leads.csv"
+        path.write_text(
+            "Parameters:TimeZone=Europe/Berlin,,,,,,,,\n"
+            + _EC_HEADER + "\n"
+            "user@example.com,,Anna,Lena,My Action,2026-03-01,10,USD\n"
+        )
+
+        result = conversion_actions.draft_upload_enhanced_conversions_for_leads(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+        plan = _stored_plan(result)
+
+        assert plan.apply_only_payload["rows"][0]["conversion_time"] == (
+            "2026-03-01 00:00:00+01:00"
+        )
+        assert "midnight was assumed" in " ".join(plan.changes["parse_warnings"])
+
     def test_without_an_offset_or_a_timezone_row_the_row_is_refused(
         self, config, tmp_path, monkeypatch
     ):

@@ -727,14 +727,26 @@ _EXPECTED_CALL_HEADERS = [
 # not dead code: ``fromisoformat`` insists on zero-padded components, so
 # ``2026-3-1 12:00`` only parses here. The slash entries stay
 # US-style (``mm/dd/yyyy``) — the dot separator is what marks German dates.
+# Fallbacks for what ``datetime.fromisoformat`` rejects. The two ISO entries are
+# not dead code: ``fromisoformat`` insists on zero-padded components, so
+# ``2026-3-1 12:00`` only parses here. The slash entries stay
+# US-style (``mm/dd/yyyy``) — the dot separator is what marks German dates —
+# and cover both the AM/PM form and Google's documented 24-hour one.
 _TIMESTAMP_FORMATS = (
     "%d.%m.%Y %H:%M:%S",
     "%d.%m.%Y %H:%M",
     "%m/%d/%Y %I:%M:%S %p",
     "%m/%d/%Y %I:%M %p",
+    "%m/%d/%Y %H:%M:%S",
+    "%m/%d/%Y %H:%M",
     "%Y-%m-%d %H:%M:%S",
     "%Y-%m-%d %H:%M",
 )
+
+
+def _has_time_component(value: str) -> bool:
+    """Does this cell carry a clock time, or is it a bare date?"""
+    return bool(re.search(r"\d{1,2}:\d{2}", value or ""))
 
 
 def _parse_amount(value_cell: str, currency_cell: str) -> tuple[object, str, str]:
@@ -1057,6 +1069,15 @@ def _parse_call_conversion_csv(
         if converted_dt > now:
             errors.append(f"Row {source_line}: Conversion Time is in the future")
             continue
+
+        # A bare date parses to midnight, which is rarely what the export
+        # meant: say so instead of quietly shifting the conversion by hours.
+        for label in ("Call Start Time", "Conversion Time"):
+            if not _has_time_component(raw[col[label]]):
+                errors.append(
+                    f"Row {source_line}: {label} carries no time — midnight "
+                    "was assumed"
+                )
 
         raw_caller = raw[col["Caller's Phone Number"]]
         out.append({
@@ -1844,6 +1865,13 @@ def _parse_ec_for_leads_csv(
         if datetime.fromisoformat(converted_time) > datetime.now(_tz.utc):
             errors.append(f"Row {source_line}: Conversion Time is in the future")
             continue
+        if not _has_time_component(raw[col["Conversion Time"]]):
+            # A bare date parses to midnight; say so instead of shifting the
+            # conversion by hours without a word.
+            errors.append(
+                f"Row {source_line}: Conversion Time carries no time — "
+                "midnight was assumed"
+            )
 
         country = _optional("Country Code").upper()
         postal = _optional("Postal Code").strip()
