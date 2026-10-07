@@ -2889,8 +2889,11 @@ def confirm_and_apply(
             "operation": plan.operation,
             "error": (
                 f"Plan '{plan.plan_id}' is no longer pending: it is being "
-                "applied right now or has already been applied. Confirm again "
-                "only after checking the conversion action for what arrived."
+                "applied right now or has already been applied. That is not a "
+                "failure — wait for the first call to return, and check the "
+                "account for what arrived before drafting anything again. For "
+                "an upload, that check means the conversion action; for other "
+                "operations, read the affected entity back."
             ),
         }
     plan = claimed

@@ -36,7 +36,9 @@ class ChangePlan:
     #
     # A plan store must round-trip this field; a store that drops it makes the
     # applier refuse loudly instead of uploading nothing quietly.
-    apply_only_payload: dict[str, Any] = field(default_factory=dict)
+    # `repr=False`: the payload holds raw caller ids, so a plan that ends up in
+    # a log line or a traceback must not print it.
+    apply_only_payload: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def apply_payload(self) -> dict[str, Any]:
         """What the applier gets: ``changes`` with the apply-only payload merged in.

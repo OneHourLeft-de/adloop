@@ -583,9 +583,9 @@ def _apply_remove_conversion_action(client: object, cid: str, changes: dict) -> 
 #      Raw PII never lands in plan.changes and never reaches the audit log.
 #
 # Security invariant shared by both: apply builds the upload protos from
-# ``plan.changes["rows"]`` (frozen at preview time), NOT by re-reading the
-# CSV. What you previewed is exactly what gets uploaded, and no raw PII is
-# re-read at apply time.
+# ``plan.apply_only_payload["rows"]`` (frozen at preview time), NOT by
+# re-reading the CSV. What you previewed is exactly what gets uploaded, and no
+# raw PII is re-read at apply time.
 # ---------------------------------------------------------------------------
 
 
@@ -603,8 +603,11 @@ def _normalize_email(email: str) -> str:
 
     * lowercase and remove whitespace everywhere;
     * for ``gmail.com`` / ``googlemail.com`` only: remove periods from the
-      username, then drop the ``+…`` suffix — skipping this produces a hash
-      Google does not expect for those domains, which silently loses matches;
+       username, then drop the ``+…`` suffix — skipping this produces a hash
+      Google does not expect for those domains, which silently loses matches.
+      Both steps are in Google's stated normalization rules; only some of the
+      per-language samples on that page leave the plus suffix alone, so this
+      follows the rule, not the samples;
     * every other domain keeps dots and plus tags.
     """
     value = re.sub(r"\s+", "", (email or "").lower())
@@ -720,6 +723,10 @@ _EXPECTED_CALL_HEADERS = [
 ]
 
 
+# Fallbacks for what ``datetime.fromisoformat`` rejects. The two ISO entries are
+# not dead code: ``fromisoformat`` insists on zero-padded components, so
+# ``2026-3-1 12:00`` only parses here. The slash entries stay
+# US-style (``mm/dd/yyyy``) — the dot separator is what marks German dates.
 _TIMESTAMP_FORMATS = (
     "%d.%m.%Y %H:%M:%S",
     "%d.%m.%Y %H:%M",
@@ -1094,7 +1101,8 @@ def draft_upload_call_conversions(
 
     Required CSV columns: Caller's Phone Number, Call Start Time, Conversion
     Name, Conversion Time, Conversion Value, Conversion Currency. An optional
-    ``Parameters:TimeZone=...`` row at the top is ignored.
+    ``Parameters:TimeZone=...`` row is read, not ignored: it resolves
+    timestamps that carry no offset of their own.
 
     The ``Conversion Name`` value MUST exactly match an existing conversion
     action whose type is UPLOAD_CALLS — checked against the account here, so a
@@ -1254,7 +1262,6 @@ def draft_upload_call_conversions(
             "distinct_conversion_actions": distinct_actions,
             # Resolved at draft time; apply reads them instead of querying again.
             "conversion_actions": action_resources,
-            "partial_failure": True,
             "consent": consent_norm,
             "parse_warnings": parse_errors,
             # Display sample uses REDACTED caller ids only.
@@ -2154,7 +2161,6 @@ def draft_upload_enhanced_conversions_for_leads(
             "distinct_conversion_actions": distinct_actions,
             # Resolved at draft time; apply reads them instead of querying again.
             "conversion_actions": action_resources,
-            "partial_failure": True,
             "consent": consent_norm,
             "parse_warnings": parse_errors,
             "dedup_warnings": dedup_warnings,
