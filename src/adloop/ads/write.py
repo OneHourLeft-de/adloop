@@ -2924,6 +2924,11 @@ def confirm_and_apply(
         }
     plan = claimed
 
+    # From here on the upload appliers tell us whether a request actually went
+    # out; nothing below has to guess that from an exception type.
+    from adloop.ads.conversion_actions import reset_send_state, sent_anything
+
+    reset_send_state()
     try:
         result = _execute_plan(config, plan)
     except Exception as e:
@@ -2933,26 +2938,18 @@ def confirm_and_apply(
         # the batches that went through. Retire the plan: confirming it again —
         # the obvious reflex after an error — would resend those rows, and call
         # conversions have no dedup key to absorb the duplicates.
-        from adloop.ads.conversion_actions import (
-            PartialUploadError,
-            UploadNotSentError,
-        )
+        from adloop.ads.conversion_actions import PartialUploadError
 
-        # For an upload the default is the cautious one: anything that failed
-        # once the request was on its way may have been received, so the plan
-        # stays claimed unless the error says explicitly that nothing arrived.
-        # A rejected first request is that case — Google answered for the whole
-        # batch and no earlier one had gone out, so the plan is still good.
-        upload_failed_after_nothing = (
+        # The plan stays usable unless a request may have reached Google. Only
+        # the applier knows that moment, so it marks it — and a request Google
+        # rejected outright wrote nothing, which the upload error says
+        # explicitly. Anything else may have arrived and must not be retried.
+        nothing_written = not sent_anything() or (
             isinstance(e, PartialUploadError)
             and not e.sent_total
             and not e.unknown_status
         )
-        if (
-            isinstance(e, UploadNotSentError)
-            or upload_failed_after_nothing
-            or not plan.operation.startswith("upload_")
-        ):
+        if not plan.operation.startswith("upload_") or nothing_written:
             store_plan(plan)
 
         if isinstance(e, PartialUploadError) and (e.sent_total or e.unknown_status):

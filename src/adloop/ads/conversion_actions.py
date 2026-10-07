@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+import threading
 from datetime import datetime, timezone as _tz
 from typing import TYPE_CHECKING
 
@@ -1511,6 +1512,25 @@ def _upload_parse_result(
 # TOO_MANY_CONVERSIONS_IN_REQUEST, so a CSV larger than that is split here.
 _MAX_ROWS_PER_REQUEST = 2000
 
+# Did the current apply already put a request on the wire? `confirm_and_apply`
+# asks this instead of guessing from the exception type, so a failure anywhere
+# before the first request keeps the plan no matter what raised.
+_SEND_STATE = threading.local()
+
+
+def reset_send_state() -> None:
+    """Mark the current thread as "nothing sent yet" (start of an apply)."""
+    _SEND_STATE.sent = False
+
+
+def sent_anything() -> bool:
+    """Has this thread sent a conversion request since the last reset?"""
+    return bool(getattr(_SEND_STATE, "sent", False))
+
+
+def _mark_sent() -> None:
+    _SEND_STATE.sent = True
+
 
 class UploadNotSentError(RuntimeError):
     """A batch failed before anything left the process.
@@ -1722,18 +1742,24 @@ def _upload_in_batches(
     for index in range(batch_total):
         start = index * _MAX_ROWS_PER_REQUEST
         chunk = rows[start:start + _MAX_ROWS_PER_REQUEST]
-        first_line = _source_line(chunk[0], start + 1)
-        last_line = _source_line(chunk[-1], start + len(chunk))
-        # Where the next batch begins, for a resume hint that names a row that
-        # is really still to be sent.
-        next_line = _next_batch_first_line(rows, start + len(chunk))
-
-        # Phase 1: build the request. For the FIRST batch nothing has left the
-        # process, so the failure is an explicit "not sent" and the plan stays
-        # retryable. Later batches are a different story: the earlier ones are
-        # already in the account, so a retry would send those again — that is a
-        # partial upload, and the plan has to be retired.
+        # Positional fallbacks first, so an error message still has a line to
+        # name even if the lookup itself is what fails.
+        first_line: object = start + 1
+        last_line: object = start + len(chunk)
+        next_line: object = None
+        # Phase 1: everything up to the request. For the FIRST batch nothing has
+        # left the process, so a failure is an explicit "not sent" and the plan
+        # stays retryable. Later batches are a different story: the earlier ones
+        # are already in the account, so a retry would send those again — that is
+        # a partial upload, and the plan has to be retired. The slicing and line
+        # lookup sit inside the try for the same reason: they happen before any
+        # request, and an exception there must not look like a sent batch.
         try:
+            first_line = _source_line(chunk[0], start + 1)
+            last_line = _source_line(chunk[-1], start + len(chunk))
+            # Where the next batch begins, for a resume hint that names a row
+            # that is really still to be sent.
+            next_line = _next_batch_first_line(rows, start + len(chunk))
             payload = build(chunk)
         except Exception as exc:  # noqa: BLE001 — re-raised per the ledger
             done = sum(batch["sent"] for batch in ledger)
@@ -1759,6 +1785,9 @@ def _upload_in_batches(
             ) from exc
 
         # Phase 2: send it. From here on the batch's fate is Google's.
+        # The marker is set first: from this line on, a failure may mean the
+        # request arrived, and the caller must not offer a blind retry.
+        _mark_sent()
         try:
             response = send(payload)
         except Exception as exc:  # noqa: BLE001 — re-raised with the ledger

@@ -3877,6 +3877,56 @@ class TestAPreSendFailureKeepsThePlan:
         assert again["status"] == "APPLIED", again
         assert len(upload.calls) == 1
 
+    def test_an_unknown_failure_before_the_first_request_keeps_the_plan(
+        self, tmp_path, monkeypatch
+    ):
+        """The decision must not depend on which exception type came out.
+
+        Only the applier knows when a request goes out, and it marks that
+        moment; anything raised before it keeps the plan, whatever the type.
+        """
+        config = self._config(tmp_path)
+        preview, upload, client = self._plan(config, tmp_path, monkeypatch)
+
+        def boom(_client, _cid, _changes):
+            raise RuntimeError("something broke before the request")
+
+        monkeypatch.setattr(
+            conversion_actions, "_apply_upload_call_conversions", boom
+        )
+        result = write.confirm_and_apply(
+            config, plan_id=preview["plan_id"], dry_run=False
+        )
+
+        assert "something broke before the request" in result["error"]
+        assert preview_store.get_plan(preview["plan_id"]) is not None
+        assert upload.calls == []
+
+        monkeypatch.undo()
+        monkeypatch.setattr("adloop.ads.client.get_ads_client", lambda _cfg: client)
+        again = write.confirm_and_apply(
+            config, plan_id=preview["plan_id"], dry_run=False
+        )
+        assert again["status"] == "APPLIED", again
+        assert len(upload.calls) == 1
+
+    def test_the_marker_flips_when_the_request_goes_out(self, monkeypatch):
+        """`sent_anything()` is the fact the retention rule is built on."""
+        monkeypatch.setattr(conversion_actions, "_MAX_ROWS_PER_REQUEST", 5)
+        rows = [{"source_line": 2, "caller_id": "+14155550142"}]
+        seen: list[bool] = []
+
+        def send(payload):
+            seen.append(conversion_actions.sent_anything())
+            return SimpleNamespace(results=[])
+
+        conversion_actions.reset_send_state()
+        assert conversion_actions.sent_anything() is False
+        conversion_actions._upload_in_batches(rows, lambda chunk: list(chunk), send)
+
+        assert seen == [True]        # marked before the request
+        assert conversion_actions.sent_anything() is True
+
     def test_an_unreachable_upload_service_keeps_the_plan(
         self, tmp_path, monkeypatch
     ):
