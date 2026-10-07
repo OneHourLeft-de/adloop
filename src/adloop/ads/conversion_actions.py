@@ -2255,12 +2255,18 @@ def draft_upload_enhanced_conversions_for_leads(
                 "only hashed names and no email/phone/address — an address "
                 "identifier needs country code and postal code as well"
             )
-        elif row["phone_was_given"]:
-            reason = "phone is not E.164 and the row has no other identifier"
-        elif row["email_was_given"]:
+        elif row["phone_was_given"] or row["email_was_given"]:
+            # Both can be broken at once; name every reason, not just the first
+            # one, or the caller fixes one and the row is skipped again.
+            broken: list[str] = []
+            if row["phone_was_given"]:
+                broken.append("phone is not a valid E.164 number")
+            if row["email_was_given"]:
+                broken.append(
+                    "email is not an address (no '@', or an empty side)"
+                )
             reason = (
-                "email is not an address (no '@', or an empty side) and the "
-                "row has no other identifier"
+                " and ".join(broken) + " — the row has no other identifier"
             )
         elif row["postal_code"] or row["country_code"]:
             reason = (

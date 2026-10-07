@@ -2579,7 +2579,26 @@ class TestSkippedAndUnmatchableRows:
         )
 
         assert "Nothing was planned" in result["error"]
-        assert "not E.164" in result["skipped_rows"][0]["reason"]
+        assert "not a valid E.164" in result["skipped_rows"][0]["reason"]
+
+    def test_a_row_with_two_broken_identifiers_names_both(
+        self, config, tmp_path, monkeypatch
+    ):
+        """Fixing only the first reason would leave the row skipped again."""
+        _patch_drafts_client(monkeypatch, "UPLOAD_CLICKS")
+        path = tmp_path / "leads.csv"
+        path.write_text(
+            _EC_HEADER + "\n" + "n/a,02079460018,,,A,2026-03-01T12:00:00Z,10,USD\n"
+        )
+
+        result = conversion_actions.draft_upload_enhanced_conversions_for_leads(
+            config, customer_id="1234567890", csv_path=str(path)
+        )
+
+        reason = result["skipped_rows"][0]["reason"]
+        assert "not a valid E.164" in reason
+        assert "not an address" in reason
+        assert "no other identifier" in reason
 
     def test_country_and_postal_reach_the_address_info(self):
         upload = _FakeClickUploadService(results_count=1)
