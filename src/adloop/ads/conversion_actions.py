@@ -756,10 +756,6 @@ _EXPECTED_CALL_HEADERS = [
 # Fallbacks for what ``datetime.fromisoformat`` rejects. The two ISO entries are
 # not dead code: ``fromisoformat`` insists on zero-padded components, so
 # ``2026-3-1 12:00`` only parses here. The slash entries stay
-# US-style (``mm/dd/yyyy``) — the dot separator is what marks German dates.
-# Fallbacks for what ``datetime.fromisoformat`` rejects. The two ISO entries are
-# not dead code: ``fromisoformat`` insists on zero-padded components, so
-# ``2026-3-1 12:00`` only parses here. The slash entries stay
 # US-style (``mm/dd/yyyy``) — the dot separator is what marks German dates —
 # and cover both the AM/PM form and Google's documented 24-hour one.
 _TIMESTAMP_FORMATS = (
@@ -895,9 +891,11 @@ def _parse_timestamp(value: str, default_tz: str) -> tuple[str, str]:
     return parsed.isoformat(sep=" ", timespec="seconds"), ""
 
 
-# Google's own upload templates start with a "Parameters:TimeZone=..." row and
-# use "#" for comments; both are skipped for every upload CSV.
-_CSV_SKIP_PREFIXES = ("Parameters:", "#")
+# Google's own upload templates carry a "Parameters:TimeZone=…" row — read, not
+# skipped, because it resolves timestamps without an offset — and use "#" for
+# comment lines, which are skipped.
+_CSV_PARAMETERS_PREFIX = "Parameters:"
+_CSV_COMMENT_PREFIX = "#"
 
 # A 2,000-row upload — the API's per-request cap — is well under 1 MB. The cap
 # only stops a stray multi-gigabyte path from being read into memory.
@@ -973,8 +971,9 @@ def _read_upload_csv(
                 if not any((cell or "").strip() for cell in record):
                     continue
                 first = (record[0] or "").strip()
-                if first.startswith("Parameters:"):
-                    for part in first.split(":", 1)[1].split(";"):
+                if first.startswith(_CSV_PARAMETERS_PREFIX):
+                    parameters = first[len(_CSV_PARAMETERS_PREFIX):]
+                    for part in parameters.split(";"):
                         key, _, value = part.partition("=")
                         if key.strip().lower() != "timezone" or not value.strip():
                             continue
@@ -989,7 +988,7 @@ def _read_upload_csv(
                                 "not a valid IANA zone id or ±HHMM offset"
                             )
                     continue
-                if first.startswith("#"):
+                if first.startswith(_CSV_COMMENT_PREFIX):
                     continue
                 records.append((start_line, record))
     except OSError as exc:
@@ -1193,56 +1192,27 @@ def draft_upload_call_conversions(
     them. The preview shows counts and redacted sample rows. Call
     confirm_and_apply with the returned plan_id.
     """
-    from adloop.runtime import deployment_mode
-    from adloop.safety.guards import SafetyViolation, check_blocked_operation
     from adloop.safety.preview import ChangePlan, store_plan
 
-    if deployment_mode() == "server":
-        return {
-            "error": (
-                "This tool uploads conversions from a CSV file on the machine "
-                "running AdLoop and is not available on the hosted server. "
-                "Use the self-hosted AdLoop MCP server for conversion uploads."
-            )
-        }
-
-    try:
-        check_blocked_operation("upload_call_conversions", config.safety)
-    except SafetyViolation as e:
-        return {"error": str(e)}
-
-    try:
-        consent_norm = _consent_from_param(consent)
-    except ValueError as e:
-        return {"error": str(e)}
-
-    default_region = (default_region or "").strip().upper()
-    if default_region and not re.fullmatch(r"[A-Z]{2}", default_region):
-        return {
-            "error": (
-                "default_region must be a two-letter ISO country code "
-                "(e.g. 'DE') or empty"
-            )
-        }
-
-    rows, parse_errors, parse_advisories, dropped_rows = _parse_call_conversion_csv(
-        csv_path, default_region
+    default_region, consent_norm, error = _upload_draft_preflight(
+        config,
+        operation="upload_call_conversions",
+        default_region=default_region,
+        consent=consent,
     )
-    if parse_errors:
-        return {
-            "error": "CSV parse failed",
-            "details": parse_errors,
-        }
-    if not rows:
-        return {
-            "error": "CSV contained zero conversion rows",
-            **({"skipped_rows": dropped_rows} if dropped_rows else {}),
-        }
+    if error:
+        return error
+
+    rows, parse_advisories, skipped, error = _upload_parse_result(
+        *_parse_call_conversion_csv(csv_path, default_region),
+        empty_message="CSV contained zero conversion rows",
+    )
+    if error:
+        return error
 
     # A call upload without a usable E.164 caller id cannot match anything —
     # Google fails such a row. Report it here instead of uploading a no-op.
     usable: list[dict] = []
-    skipped: list[dict] = list(dropped_rows)
     for row in rows:
         caller = (row.get("caller_id") or "").strip()
         if caller.startswith("+"):
@@ -1470,6 +1440,71 @@ def _value_summary(
             "is not a meaningful amount. Use total_value_by_currency."
         )
     return total, by_currency, hint, warnings
+
+
+def _upload_draft_preflight(
+    config: AdLoopConfig,
+    *,
+    operation: str,
+    default_region: str,
+    consent: dict | None,
+) -> tuple[str, dict | None, dict | None]:
+    """The guards both upload drafts run before they touch the CSV.
+
+    Returns ``(default_region, consent, error_response)`` with the region
+    normalised and the consent validated. Both drafts live on a local file, so
+    the server-mode refusal sits here too.
+    """
+    from adloop.runtime import deployment_mode
+    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+
+    if deployment_mode() == "server":
+        return "", None, {
+            "error": (
+                "This tool uploads conversions from a CSV file on the machine "
+                "running AdLoop and is not available on the hosted server. "
+                "Use the self-hosted AdLoop MCP server for conversion uploads."
+            )
+        }
+
+    try:
+        check_blocked_operation(operation, config.safety)
+    except SafetyViolation as e:
+        return "", None, {"error": str(e)}
+
+    try:
+        consent_norm = _consent_from_param(consent)
+    except ValueError as e:
+        return "", None, {"error": str(e)}
+
+    region = (default_region or "").strip().upper()
+    if region and not re.fullmatch(r"[A-Z]{2}", region):
+        return "", None, {
+            "error": (
+                "default_region must be a two-letter ISO country code "
+                "(e.g. 'DE') or empty"
+            )
+        }
+    return region, consent_norm, None
+
+
+def _upload_parse_result(
+    rows: list[dict],
+    errors: list[str],
+    advisories: list[str],
+    dropped: list[dict],
+    *,
+    empty_message: str,
+) -> tuple[list[dict], list[str], list[dict], dict | None]:
+    """Turn a parser's return value into ``(rows, advisories, skipped, error)``."""
+    if errors:
+        return [], [], [], {"error": "CSV parse failed", "details": errors}
+    if not rows:
+        return [], [], [], {
+            "error": empty_message,
+            **({"skipped_rows": dropped} if dropped else {}),
+        }
+    return rows, advisories, list(dropped), None
 
 
 # Google rejects a single upload request above 2,000 conversions with
@@ -2148,53 +2183,23 @@ def draft_upload_enhanced_conversions_for_leads(
 
     Call confirm_and_apply with the returned plan_id to execute.
     """
-    from adloop.runtime import deployment_mode
-    from adloop.safety.guards import SafetyViolation, check_blocked_operation
     from adloop.safety.preview import ChangePlan, store_plan
 
-    if deployment_mode() == "server":
-        return {
-            "error": (
-                "This tool uploads conversions from a CSV file on the machine "
-                "running AdLoop and is not available on the hosted server. "
-                "Use the self-hosted AdLoop MCP server for conversion uploads."
-            )
-        }
-
-    try:
-        check_blocked_operation(
-            "upload_enhanced_conversions_for_leads", config.safety
-        )
-    except SafetyViolation as e:
-        return {"error": str(e)}
-
-    try:
-        consent_norm = _consent_from_param(consent)
-    except ValueError as e:
-        return {"error": str(e)}
-
-    default_region = (default_region or "").strip().upper()
-    if default_region and not re.fullmatch(r"[A-Z]{2}", default_region):
-        return {
-            "error": (
-                "default_region must be a two-letter ISO country code "
-                "(e.g. 'DE') or empty"
-            )
-        }
-
-    rows, parse_errors, parse_advisories, dropped_rows = _parse_ec_for_leads_csv(
-        csv_path, default_region
+    default_region, consent_norm, error = _upload_draft_preflight(
+        config,
+        operation="upload_enhanced_conversions_for_leads",
+        default_region=default_region,
+        consent=consent,
     )
-    if parse_errors:
-        return {
-            "error": "CSV parse failed",
-            "details": parse_errors,
-        }
-    if not rows:
-        return {
-            "error": "CSV contained zero conversion rows",
-            **({"skipped_rows": dropped_rows} if dropped_rows else {}),
-        }
+    if error:
+        return error
+
+    rows, parse_advisories, skipped, error = _upload_parse_result(
+        *_parse_ec_for_leads_csv(csv_path, default_region),
+        empty_message="CSV contained zero conversion rows",
+    )
+    if error:
+        return error
 
     # A row that cannot match would be uploaded to no effect and counted as a
     # success later. Google's identifier list is explicit about what an address
@@ -2202,7 +2207,6 @@ def draft_upload_enhanced_conversions_for_leads(
     # names and plain address — a postcode alone identifies nobody. So a row is
     # usable with an email, an E.164 phone, or that complete address.
     usable: list[dict] = []
-    skipped: list[dict] = list(dropped_rows)
     for row in rows:
         has_names = bool(row["first_name_sha256"] and row["last_name_sha256"])
         has_address = bool(
