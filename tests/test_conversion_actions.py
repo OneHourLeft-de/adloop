@@ -3374,6 +3374,43 @@ class TestValueAndCurrencyAreOptional:
         assert plan.apply_only_payload["rows"][0]["currency_code"] == ""
         assert plan.changes["currency_hint"] == ""
         assert plan.changes["rows_without_currency"] == 1
+        # The breakdown still names where the value went: the action's own
+        # currency, not an invented one.
+        assert plan.changes["total_value_by_currency"] == {"account default": 10.0}
+        assert plan.changes["value_warnings"] == []
+
+    def test_mixed_currencies_are_not_summed_into_one_number(
+        self, config, tmp_path, monkeypatch
+    ):
+        result = self._call_draft(
+            config, tmp_path, monkeypatch,
+            "+14155550142,2026-03-01T12:00:00Z,My Action,"
+            "2026-03-01T13:00:00Z,10,EUR\n"
+            "+14155550143,2026-03-01T12:00:00Z,My Action,"
+            "2026-03-01T13:00:00Z,20,USD\n",
+        )
+        plan = _stored_plan(result)
+
+        assert plan.changes["total_value_by_currency"] == {"EUR": 10.0, "USD": 20.0}
+        # No hint, because there is no single answer to give.
+        assert plan.changes["currency_hint"] == ""
+        warnings = " ".join(plan.changes["value_warnings"])
+        assert "2 different currencies" in warnings
+        assert "not a meaningful amount" in warnings
+
+    def test_one_shared_currency_keeps_the_hint(self, config, tmp_path, monkeypatch):
+        result = self._call_draft(
+            config, tmp_path, monkeypatch,
+            "+14155550142,2026-03-01T12:00:00Z,My Action,"
+            "2026-03-01T13:00:00Z,10,EUR\n"
+            "+14155550143,2026-03-01T12:00:00Z,My Action,"
+            "2026-03-01T13:00:00Z,20,EUR\n",
+        )
+        plan = _stored_plan(result)
+
+        assert plan.changes["currency_hint"] == "EUR"
+        assert plan.changes["total_value_by_currency"] == {"EUR": 30.0}
+        assert plan.changes["value_warnings"] == []
 
     def test_the_applier_leaves_the_fields_alone_when_they_are_empty(
         self, config, tmp_path, monkeypatch

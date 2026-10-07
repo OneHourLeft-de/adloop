@@ -1269,9 +1269,8 @@ def draft_upload_call_conversions(
     rows = usable
 
     distinct_actions = sorted({r["conversion_name"] for r in rows})
-    total_value = sum(
-        r["conversion_value"] for r in rows
-        if r["conversion_value"] is not None
+    total_value, totals_by_currency, currency_hint, value_warnings = (
+        _value_summary(rows)
     )
     rows_without_value = sum(
         1 for r in rows if r["conversion_value"] is None
@@ -1320,10 +1319,14 @@ def draft_upload_call_conversions(
         requires_double_confirm=True,
         changes={
             "row_count": len(rows),
-            "total_value": round(total_value, 2),
+            "total_value": total_value,
+            # Only meaningful when every row shares one currency; the warning
+            # below says so when they do not.
+            "total_value_by_currency": totals_by_currency,
+            "currency_hint": currency_hint,
+            "value_warnings": value_warnings,
             # Blank stays blank: the field is left unset so Google falls back to
             # the conversion action's default instead of an invented currency.
-            "currency_hint": rows[0]["currency_code"],
             "rows_without_value": rows_without_value,
             "rows_without_currency": rows_without_currency,
             "skipped_count": len(skipped),
@@ -1431,6 +1434,42 @@ def _action_first_lines(rows: list[dict]) -> dict[str, object]:
     for index, row in enumerate(rows, start=1):
         lines.setdefault(row["conversion_name"], _source_line(row, index))
     return lines
+
+
+def _value_summary(
+    rows: list[dict],
+) -> tuple[float, dict[str, float], str, list[str]]:
+    """Total value, the same total per currency, a hint and a warning.
+
+    ``total_value`` adds every row that carries a value. That number only means
+    something when the rows share a currency, so the breakdown travels with it
+    and a file that mixes EUR and USD is called out instead of being summed
+    into a figure nobody can act on.
+    """
+    by_currency: dict[str, float] = {}
+    codes: set[str] = set()
+    for row in rows:
+        if row.get("conversion_value") is None:
+            continue
+        # A blank currency cell means "the conversion action's currency".
+        code = row.get("currency_code") or ""
+        codes.add(code)
+        key = code or "account default"
+        by_currency[key] = round(
+            by_currency.get(key, 0.0) + row["conversion_value"], 2
+        )
+
+    total = round(sum(by_currency.values()), 2)
+    # The hint is only worth having when every row agrees on one real code.
+    hint = next(iter(codes)) if len(codes) == 1 else ""
+    warnings: list[str] = []
+    if len(by_currency) > 1:
+        warnings.append(
+            f"The rows carry {len(by_currency)} different currencies "
+            f"({', '.join(sorted(by_currency))}); total_value adds them up and "
+            "is not a meaningful amount. Use total_value_by_currency."
+        )
+    return total, by_currency, hint, warnings
 
 
 # Google rejects a single upload request above 2,000 conversions with
@@ -2209,9 +2248,8 @@ def draft_upload_enhanced_conversions_for_leads(
     rows = usable
 
     distinct_actions = sorted({r["conversion_name"] for r in rows})
-    total_value = sum(
-        r["conversion_value"] for r in rows
-        if r["conversion_value"] is not None
+    total_value, totals_by_currency, currency_hint, value_warnings = (
+        _value_summary(rows)
     )
     rows_without_value = sum(
         1 for r in rows if r["conversion_value"] is None
@@ -2305,10 +2343,14 @@ def draft_upload_enhanced_conversions_for_leads(
         requires_double_confirm=True,
         changes={
             "row_count": len(rows),
-            "total_value": round(total_value, 2),
+            "total_value": total_value,
+            # Only meaningful when every row shares one currency; the warning
+            # below says so when they do not.
+            "total_value_by_currency": totals_by_currency,
+            "currency_hint": currency_hint,
+            "value_warnings": value_warnings,
             # Blank stays blank: the field is left unset so Google falls back to
             # the conversion action's default instead of an invented currency.
-            "currency_hint": rows[0]["currency_code"],
             "rows_without_value": rows_without_value,
             "rows_without_currency": rows_without_currency,
             "rows_with_email": with_email,
