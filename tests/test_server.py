@@ -533,6 +533,31 @@ class TestDirectoryReadiness:
             assert "always call" not in text, tool.name
 
     @pytest.mark.asyncio
+    async def test_descriptions_neither_judge_nor_compare(self):
+        """Directory reviews reject descriptions that disparage a platform or
+        compare AdLoop with alternatives."""
+        import re
+
+        from adloop.server import mcp
+
+        judging = re.compile(
+            r"self-serving|\b(better|worse) than\b|\bunlike (other|google|reddit)\b"
+            r"|\binstead of (the )?(google|reddit) ui\b",
+            re.IGNORECASE,
+        )
+        for tool in await mcp.list_tools():
+            assert not judging.search(tool.description or ""), tool.name
+
+    @pytest.mark.asyncio
+    async def test_tool_names_say_what_they_return(self):
+        """get_asset_performance returned PMax asset details, not performance."""
+        from adloop.server import mcp
+
+        names = {tool.name for tool in await mcp.list_tools()}
+        assert "get_pmax_assets" in names
+        assert "get_asset_performance" not in names
+
+    @pytest.mark.asyncio
     async def test_descriptions_document_instead_of_instruct(self):
         import re
 

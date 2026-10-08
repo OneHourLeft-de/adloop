@@ -1048,8 +1048,8 @@ def get_recommendations(
         "MAXIMIZE_CONVERSIONS_OPT_IN", "RESPONSIVE_SEARCH_AD"]. Empty = all types.
     campaign_id: optional — scope to a single campaign.
 
-    Includes insights that flag budget-increase recommendations (often self-serving)
-    and highlight high-impact suggestions worth investigating.
+    Includes insights that flag budget-increase recommendations (their projected
+    gain comes from spending more) and highlight high-impact suggestions.
     """
     from adloop.ads.read import get_recommendations as _impl
 
@@ -1093,16 +1093,16 @@ def get_pmax_performance(
 
 
 @_tool(
-    title="Performance Max asset performance",
+    title="Performance Max assets",
     annotations=_READONLY,
     tags={"ads"},
 )
 @_safe
-def get_asset_performance(
+def get_pmax_assets(
     customer_id: str = "",
     campaign_id: str = "",
 ) -> dict:
-    """Get per-asset details for Performance Max campaigns.
+    """List the assets of Performance Max campaigns with type, status and content.
 
     Returns each asset's field_type (HEADLINE, DESCRIPTION, MARKETING_IMAGE,
     YOUTUBE_VIDEO, etc.), primary_status (ELIGIBLE, NOT_ELIGIBLE, PAUSED,

@@ -101,7 +101,7 @@ The best features come from real workflows. If you're using AdLoop and find your
 | `get_negative_keyword_list_campaigns` | List which campaigns a shared negative keyword list is attached to |
 | `get_recommendations` | Google's auto-generated recommendations with type, estimated impact, and campaign context |
 | `get_pmax_performance` | Performance Max campaign metrics with network breakdown + asset group ad strength |
-| `get_asset_performance` | Per-asset details for PMax — field type, serving status, content |
+| `get_pmax_assets` | Per-asset details for PMax — field type, serving status, content |
 | `get_detailed_asset_performance` | Top-performing asset combinations — which headline+description+image combos Google selects most |
 | `get_audience_performance` | Audience segment performance — remarketing, in-market, affinity, demographics |
 | `get_demographic_targeting` | List demographic criteria (age/gender/parental status/income) on an ad group or campaign |
