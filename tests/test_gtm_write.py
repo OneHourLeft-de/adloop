@@ -535,6 +535,21 @@ class TestTriggers:
                                    trigger_type="customEvent")
         assert result["error"] == "Validation failed"
 
+    def test_custom_event_name_cannot_change_on_an_existing_trigger(
+        self, tmp_path, fake
+    ):
+        """It was dropped silently: the rename applied and the event did not."""
+        from adloop.gtm.write import draft_gtm_trigger
+
+        fake.triggers["5"] = {
+            "triggerId": "5", "name": "lead", "type": "customEvent",
+            "fingerprint": "t1",
+        }
+        result = draft_gtm_trigger(_config(tmp_path), **_ids(), trigger_id="5",
+                                   name="renamed", custom_event_name="b")
+        assert result["error"] == "Validation failed"
+        assert any("custom_event_name" in d for d in result["details"])
+
     def test_update_preserves_unmanaged_fields(self, tmp_path, fake):
         from adloop.gtm.write import draft_gtm_trigger
 

@@ -516,6 +516,12 @@ def draft_gtm_trigger(
             )
         if trigger_type == "customEvent" and not custom_event_name:
             errors.append("custom_event_name is required when trigger_type=customEvent")
+    elif custom_event_name:
+        errors.append(
+            "custom_event_name cannot be changed on an existing trigger — the "
+            "event name lives in the trigger's custom event filter. Edit it in "
+            "the GTM UI, or delete the trigger and create a new one."
+        )
     if custom_event_name and trigger_type and trigger_type != "customEvent":
         errors.append("custom_event_name only applies to trigger_type=customEvent")
     if errors:

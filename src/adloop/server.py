@@ -1938,7 +1938,9 @@ def draft_gtm_trigger(
             formSubmission, customEvent, elementVisibility, scrollDepth,
             youTubeVideo, historyChange, timer, jsError or triggerGroup.
         custom_event_name: The dataLayer event name. Required for trigger type
-            customEvent and rejected for every other type.
+            customEvent, rejected for every other type, and rejected on an
+            existing trigger, where the event name sits in its custom event
+            filter.
         filters: GTM conditions, each a dict with "type" (EQUALS, CONTAINS,
             MATCH_REGEX, ...) and "parameter" (arg0 = variable, arg1 =
             value), for example clicks on tel: links [{"type": "CONTAINS",
