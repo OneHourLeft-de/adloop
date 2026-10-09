@@ -44,7 +44,7 @@ You have access to AdLoop MCP tools that connect Google Ads, Reddit Ads and Goog
 | `get_negative_keyword_list_campaigns` | List which campaigns a shared negative keyword list is attached to | `shared_set_id` (optional) |
 | `get_recommendations` | Google's auto-generated recommendations with estimated impact — budget, keyword, bid strategy, ad copy suggestions | `recommendation_types` (optional filter), `campaign_id` (optional) |
 | `get_pmax_performance` | Performance Max campaign metrics with network breakdown + asset group ad strength | `date_range_start`, `date_range_end` |
-| `get_asset_performance` | Per-asset details for PMax — field type, serving status, content. Use with `get_detailed_asset_performance` for quality signals | `campaign_id` (optional) |
+| `get_pmax_assets` | Per-asset details for PMax — field type, serving status, content. Use with `get_detailed_asset_performance` for quality signals | `campaign_id` (optional) |
 | `get_detailed_asset_performance` | Top-performing asset combinations — which headline+description+image combos Google selects most | `campaign_id` (optional) |
 | `get_audience_performance` | Audience segment metrics — remarketing, in-market, affinity, demographics | `date_range_start`, `date_range_end`, `campaign_id` (optional) |
 | `get_demographic_targeting` | List current demographic criteria (age/gender/parental status/income) on an ad group or campaign — returns each criterion's `remove_id` for use with `remove_entity` | exactly one of `ad_group_id` or `campaign_id` |
@@ -61,9 +61,9 @@ You have access to AdLoop MCP tools that connect Google Ads, Reddit Ads and Goog
 - Ads read tools automatically compute `metrics.cost` and `metrics.cpa` from `metrics.cost_micros` — no manual division needed. `metrics.currency` contains the account's currency code (auto-detected).
 - `metrics.average_cpc_amount` is also pre-computed where available.
 - `get_ad_performance` returns full `headlines` and `descriptions` lists for RSAs.
-- `get_recommendations` returns `estimated_improvement` per recommendation (potential minus base metrics) and `insights[]` that flag self-serving budget recommendations.
+- `get_recommendations` returns `estimated_improvement` per recommendation (potential minus base metrics) and `insights[]` that flag budget-increase recommendations, whose projected gain comes from spending more.
 - PMax tools: `get_pmax_performance` returns `insights[]` flagging weak ad strength and zero-conversion asset groups. `segments.ad_network_type` includes MIXED — a Google catch-all for most PMax traffic. Full channel splits (Search vs YouTube vs Display vs Discover) are not available via the API.
-- `get_asset_performance` returns `by_status` and `by_field_type` summaries. Note: per-asset performance labels (BEST/GOOD/LOW) are not available for PMax assets in the Google Ads API. Use `get_detailed_asset_performance` for quality signals via top combinations.
+- `get_pmax_assets` returns `by_status` and `by_field_type` summaries. Note: per-asset performance labels (BEST/GOOD/LOW) are not available for PMax assets in the Google Ads API. Use `get_detailed_asset_performance` for quality signals via top combinations.
 - `get_audience_performance` works for campaigns with explicit audience targeting. PMax audience targeting is automatic and may not appear in this report. When the results include SEARCH campaigns, `insights[]` reminds you that custom segments cannot be attached to them (see the compatibility matrix below) — relay that constraint instead of proposing impossible pairings.
 - `get_demographic_targeting` returns an empty list when no demographics have been excluded or narrowed — that is the DEFAULT state (Google serves to all segments). Each criterion includes a composite `remove_id` (`adGroupId~criterionId` or `campaignId~criterionId`) that can be passed straight to `remove_entity`.
 - **Compact mode for audits**: `get_campaign_performance`, `get_keyword_performance`, `get_search_terms`, and `get_ad_performance` accept `compact=true`, returning account totals, breakdowns, the top-10 rows, and pre-computed offender lists (zero-conversion spenders, low-QS keywords, negative-keyword waste candidates, thin RSAs, single-ad ad groups) instead of every row; compact `get_ad_performance` keeps `final_urls` on its rows and adds `landing_pages` (every final URL across all ads with its ad count), so landing-page checks need no extra GAQL — roughly 90% smaller. Use it for account audits and overviews so raw tables don't flood the context; use the default full mode when you need a specific entity's exact rows before drafting a change. In harnesses with subagents, heavy multi-tool audits can additionally be delegated to a subagent that returns only the summary.
@@ -508,7 +508,7 @@ Reddit's structure is campaign → ad group (budget, bid, pixel, targeting) → 
 
 1. Call `get_pmax_performance` for campaign-level metrics with network breakdown and asset group ad strength
 2. Review `insights[]` — weak ad strength and zero-conversion asset groups are the most actionable findings
-3. If ad strength is POOR or AVERAGE, call `get_asset_performance` to see which specific assets are underperforming (LOW label) and which asset types are missing
+3. If ad strength is POOR or AVERAGE, call `get_pmax_assets` to see each asset's type and serving status and which asset types are missing (per-asset LOW/GOOD/BEST labels don't exist for PMax; `get_detailed_asset_performance` shows which combinations Google serves most)
 4. Call `get_detailed_asset_performance` to see which headline+description+image combinations Google selects most — this reveals what's actually working
 5. If the user wants to improve PMax performance:
    - Replace LOW-performing assets with new ones
@@ -519,7 +519,7 @@ Reddit's structure is campaign → ad group (budget, bid, pixel, targeting) → 
 ### When user asks about Google's recommendations or "what does Google suggest"
 
 1. Call `get_recommendations` to retrieve all active (non-dismissed) recommendations
-2. Review the `by_type` summary and `insights[]` — these flag self-serving budget recommendations
+2. Review the `by_type` summary and `insights[]` — these flag budget-increase recommendations, whose projected gain comes from spending more
 3. **NEVER blindly endorse Google's recommendations.** Cross-reference each recommendation against actual account data:
    - If Google says "raise budget" but the campaign has zero conversions → bad advice. Fix tracking/landing pages first.
    - If Google says "add keywords" but existing keywords have quality score < 5 → bad advice. Fix relevance first.

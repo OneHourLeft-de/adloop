@@ -2682,17 +2682,17 @@ def test_performance_max_refusal_is_case_insensitive():
     assert any("Performance Max" in e for e in errors)
 
 
-def test_other_non_search_types_warn_but_are_allowed():
-    """DISPLAY, SHOPPING and VIDEO do produce a usable campaign.
+def test_other_non_search_types_are_refused_at_draft():
+    """DISPLAY, SHOPPING and VIDEO cannot be built by the Search create path.
 
-    Nothing here can populate them, since draft_ad_group is SEARCH-only,
-    but a shell finished in the UI is a legitimate workflow. Only PMax is
-    refused, because a PMax shell can never serve at all.
+    The apply adds a SEARCH_STANDARD ad group and language criteria and sets
+    no shopping_setting, so Google rejects all three (issue #68: Shopping
+    failed with "shopping_setting: The required field was not present").
     """
     from adloop.ads import write
 
-    for channel in ("DISPLAY", "SHOPPING", "VIDEO"):
-        errors, warnings = write._validate_campaign(
+    for channel in ("DISPLAY", "SHOPPING", "VIDEO", "shopping"):
+        errors, _ = write._validate_campaign(
             None,
             campaign_name=f"{channel} Test",
             daily_budget=50.0,
@@ -2706,14 +2706,15 @@ def test_other_non_search_types_warn_but_are_allowed():
             customer_id="1234567890",
         )
 
-        assert not any("Performance Max" in e for e in errors), channel
-        assert any("shell only" in w for w in warnings), channel
+        joined = " ".join(errors)
+        assert f"{channel.upper()} campaigns cannot be created yet" in joined, channel
+        assert "Google Ads interface" in joined, channel
 
 
-def test_search_campaigns_get_neither_the_refusal_nor_the_shell_warning():
+def test_search_campaigns_are_not_refused():
     from adloop.ads import write
 
-    errors, warnings = write._validate_campaign(
+    errors, _ = write._validate_campaign(
         None,
         campaign_name="Search Test",
         daily_budget=50.0,
@@ -2728,7 +2729,7 @@ def test_search_campaigns_get_neither_the_refusal_nor_the_shell_warning():
     )
 
     assert not any("Performance Max" in e for e in errors)
-    assert not any("shell only" in w for w in warnings)
+    assert not any("cannot be created yet" in e for e in errors)
 
 
 def test_extract_error_message_reads_proto_plus_failures():

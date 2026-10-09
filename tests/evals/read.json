@@ -38,10 +38,10 @@
     {
       "id": 4,
       "prompt": "I have a Performance Max campaign that's not performing well. Can you dig into it and tell me what's going on?",
-      "expected_output": "Should call get_pmax_performance for overall metrics and asset group ad strength, then get_asset_performance for underperforming assets, should mention MIXED transparency limitations.",
+      "expected_output": "Should call get_pmax_performance for overall metrics and asset group ad strength, then get_pmax_assets for underperforming assets, should mention MIXED transparency limitations.",
       "expectations": [
         "Calls get_pmax_performance for campaign-level metrics",
-        "Calls get_asset_performance or get_detailed_asset_performance for asset details",
+        "Calls get_pmax_assets or get_detailed_asset_performance for asset details",
         "Mentions that MIXED network type is a catch-all and full channel splits are not available",
         "Identifies asset diversity issues or weak ad strength as actionable findings"
       ]

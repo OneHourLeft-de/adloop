@@ -501,6 +501,21 @@ class TestDirectoryReadiness:
         assert "Args:" not in tool.description
         assert "description" in tool.parameters["properties"]["campaign_id"]
 
+    @pytest.mark.asyncio
+    async def test_every_parameter_has_a_schema_description(self):
+        """Directory quality scores rate tools with undocumented parameters
+        low; FastMCP fills these from each docstring's Args: section."""
+        from adloop.server import mcp
+
+        undocumented = []
+        for tool in await mcp.list_tools():
+            assert "Args:" not in (tool.description or ""), tool.name
+            for name, prop in (tool.parameters.get("properties") or {}).items():
+                text = (prop.get("description") or "").strip()
+                if not text or "Args:" in text:
+                    undocumented.append(f"{tool.name}.{name}")
+        assert not undocumented, "\n".join(undocumented)
+
     # Phrasings that instruct the model instead of documenting the tool.
     # Directory policy: descriptions carry no instructions about model
     # behavior, other tools, or external instruction sources.
@@ -545,6 +560,31 @@ class TestDirectoryReadiness:
             text = (tool.description or "").lower()
             assert "cursor rules" not in text, tool.name
             assert "always call" not in text, tool.name
+
+    @pytest.mark.asyncio
+    async def test_descriptions_neither_judge_nor_compare(self):
+        """Directory reviews reject descriptions that disparage a platform or
+        compare AdLoop with alternatives."""
+        import re
+
+        from adloop.server import mcp
+
+        judging = re.compile(
+            r"self-serving|\b(better|worse) than\b|\bunlike (other|google|reddit)\b"
+            r"|\binstead of (the )?(google|reddit) ui\b",
+            re.IGNORECASE,
+        )
+        for tool in await mcp.list_tools():
+            assert not judging.search(tool.description or ""), tool.name
+
+    @pytest.mark.asyncio
+    async def test_tool_names_say_what_they_return(self):
+        """get_asset_performance returned PMax asset details, not performance."""
+        from adloop.server import mcp
+
+        names = {tool.name for tool in await mcp.list_tools()}
+        assert "get_pmax_assets" in names
+        assert "get_asset_performance" not in names
 
     @pytest.mark.asyncio
     async def test_descriptions_document_instead_of_instruct(self):
