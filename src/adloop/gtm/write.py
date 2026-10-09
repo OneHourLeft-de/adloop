@@ -35,6 +35,8 @@ import json
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+from adloop.gtm.entities import ENTITY_ID_FIELDS, ENTITY_KINDS, entity_id
+
 if TYPE_CHECKING:
     from adloop.config import AdLoopConfig
     from adloop.safety.preview import ChangePlan
@@ -78,25 +80,9 @@ _TRIGGER_FIELDS = {
     "parameters": "parameter",
 }
 
-_ENTITY_KINDS = ("tag", "trigger", "variable", "folder", "client",
-                 "transformation", "zone", "builtInVariable",
-                 "customTemplate", "gtagConfig")
-
-# The field carrying a kind's own id inside the Entity wrapper. A custom
-# template names it ``templateId`` (v2 discovery document), every other kind
-# follows ``<kind>Id``; a built-in variable has no id and falls back to its
-# name.
-_ENTITY_ID_FIELDS = {"customTemplate": "templateId"}
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _entity_id(kind: str, entity: dict) -> str:
-    field = _ENTITY_ID_FIELDS.get(kind, f"{kind}Id")
-    return str(entity.get(field) or entity.get("name") or "")
 
 
 def _require_writes(config: AdLoopConfig) -> None:
@@ -277,12 +263,12 @@ def _workspace_digest(status: dict) -> str:
     """Stable digest of a workspace's pending changes (for publish pinning)."""
     items = []
     for change in status.get("workspaceChange", []) or []:
-        for kind in _ENTITY_KINDS:
+        for kind in ENTITY_KINDS:
             if kind in change:
                 entity = change[kind]
                 items.append([
                     kind,
-                    _entity_id(kind, entity),
+                    entity_id(kind, entity),
                     change.get("changeStatus", ""),
                     str(entity.get("fingerprint", "")),
                 ])
@@ -293,14 +279,14 @@ def _workspace_digest(status: dict) -> str:
 def _summarize_changes(status: dict) -> list[dict]:
     out = []
     for change in status.get("workspaceChange", []) or []:
-        for kind in _ENTITY_KINDS:
+        for kind in ENTITY_KINDS:
             if kind in change:
                 entity = change[kind]
                 out.append({
                     "change_status": change.get("changeStatus"),
                     "entity_kind": kind,
                     "entity_id": entity.get(
-                        _ENTITY_ID_FIELDS.get(kind, f"{kind}Id")
+                        ENTITY_ID_FIELDS.get(kind, f"{kind}Id")
                     ),
                     "name": entity.get("name"),
                     "type": entity.get("type"),

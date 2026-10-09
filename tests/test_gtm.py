@@ -693,3 +693,69 @@ class TestAuditEventCoverageMatrixShape:
         )
         names = [row["event_name"] for row in result["matrix"]]
         assert names == sorted(names)
+
+
+# ---------------------------------------------------------------------------
+# get_workspace_diff — every Entity kind, not just tags and triggers
+# ---------------------------------------------------------------------------
+
+
+class TestWorkspaceDiff:
+    class _Req:
+        def __init__(self, value):
+            self._value = value
+
+        def execute(self):
+            return self._value
+
+    class _Ws:
+        def __init__(self, status):
+            self._status = status
+
+        def getStatus(self, path):
+            return TestWorkspaceDiff._Req(self._status)
+
+    class _Client:
+        def __init__(self, status):
+            self._status = status
+
+        def accounts(self):
+            return self
+
+        def containers(self):
+            return self
+
+        def workspaces(self):
+            return TestWorkspaceDiff._Ws(self._status)
+
+    def _diff(self, status):
+        from adloop.config import AdLoopConfig, GtmConfig
+        from adloop.gtm import read
+
+        config = AdLoopConfig(
+            gtm=GtmConfig(account_id="1", container_id="2"),
+        )
+        client = self._Client(status)
+        with patch("adloop.gtm.client.get_gtm_client", lambda _cfg: client):
+            return read.get_workspace_diff(
+                config, account_id="1", container_id="2", workspace_id="12"
+            )
+
+    def test_a_custom_template_change_is_listed(self):
+        """Regression: a template-only workspace reported a count but no row."""
+        out = self._diff({"workspaceChange": [
+            {"changeStatus": "added", "customTemplate": {
+                "templateId": "7", "name": "Call tracking", "fingerprint": "f"}},
+        ]})
+        assert out["change_count"] == 1
+        assert [c["entity_kind"] for c in out["changes"]] == ["customTemplate"]
+        assert out["changes"][0]["entity_id"] == "7"
+        assert out["changes"][0]["name"] == "Call tracking"
+
+    def test_a_gtag_config_change_is_listed(self):
+        out = self._diff({"workspaceChange": [
+            {"changeStatus": "added", "gtagConfig": {
+                "gtagConfigId": "9", "type": "googtag"}},
+        ]})
+        assert [c["entity_kind"] for c in out["changes"]] == ["gtagConfig"]
+        assert out["changes"][0]["entity_id"] == "9"
