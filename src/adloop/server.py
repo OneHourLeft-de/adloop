@@ -3140,9 +3140,14 @@ def confirm_and_apply(
     the target entity and re-checks the safety caps (returned as `checks`).
 
     Either way, a DRY_RUN_FAILED result means the real apply would also fail.
-    Returns a status (DRY_RUN_SUCCESS, DRY_RUN_FAILED, DRY_RUN_REQUIRED or
-    APPLIED) with the plan_id and operation; APPLIED results carry the created
-    or changed resource names under 'result'.
+    Returns a status with the plan_id and operation: DRY_RUN_SUCCESS,
+    DRY_RUN_FAILED, DRY_RUN_REQUIRED, APPLIED, PARTIAL_UPLOAD or
+    APPLY_IN_PROGRESS. APPLIED results carry the created or changed resource
+    names under 'result'. PARTIAL_UPLOAD belongs to the upload tools: earlier
+    batches are already in the account, and 'sent_total', 'batches' and
+    'resume_from_line' say how far the upload got and at which CSV line a new
+    draft starts. APPLY_IN_PROGRESS means an earlier call claimed this plan
+    first, so this call executed nothing.
 
     Args:
         plan_id: The plan_id returned by a prior draft_*, update_*, add_*,
@@ -4444,14 +4449,26 @@ def draft_upload_call_conversions(
     Apply uploads exactly what you previewed (no CSV re-read).
 
     Phone numbers are normalized with libphonenumber semantics: a number
-    without a country code needs ``default_region`` (e.g. "DE" for
-    "0151 12345678"), an extension is dropped, and the German trunk marker in
-    "+49 (0)89 …" is handled. Rows whose number stays unusable are skipped and
-    reported in `skipped_rows` instead of being uploaded to no effect.
+    carries no country code needs ``default_region``, an extension is dropped,
+    and the German trunk marker in "+49 (0)89 …" is handled. Rows whose number
+    stays unusable are skipped and reported in `skipped_rows` instead of being
+    uploaded to no effect.
 
-    consent (GDPR/EEA): {"ad_user_data": "GRANTED"|"DENIED"|"UNSPECIFIED",
-    "ad_personalization": ...}. Defaults to UNSPECIFIED. The returned plan_id
-    is applied with confirm_and_apply.
+    Returns a preview with a plan_id, the row counts and the skipped rows;
+    nothing is uploaded until that preview is confirmed.
+
+    Args:
+        csv_path: Path of the CSV file holding the upload rows, read on the
+            machine that runs AdLoop. The hosted server refuses this tool
+            rather than reading a path of its own.
+        default_region: ISO 3166-1 alpha-2 country assumed for phone numbers
+            that carry no country code, e.g. "DE" for "0151 12345678". Empty
+            leaves such numbers unusable and the row is skipped.
+        consent: Consent signals for GDPR/EEA, as an object with "ad_user_data"
+            and/or "ad_personalization", each "GRANTED", "DENIED" or
+            "UNSPECIFIED". None sends UNSPECIFIED.
+        customer_id: Google Ads customer ID (digits, e.g. "1234567890"). Empty
+            uses the configured default account.
     """
     from adloop.ads.conversion_actions import (
         draft_upload_call_conversions as _impl,
@@ -4489,9 +4506,25 @@ def draft_upload_enhanced_conversions_for_leads(
 
     An Order ID column makes re-uploads dedup instead of double-counting.
 
-    consent (GDPR/EEA): {"ad_user_data": "GRANTED"|"DENIED"|"UNSPECIFIED",
-    "ad_personalization": ...}. Defaults to UNSPECIFIED. The returned plan_id
-    is applied with confirm_and_apply.
+    Local file only: on the hosted server this tool refuses, because it would
+    read a path on the server rather than the caller's machine.
+
+    Returns a preview with a plan_id, the row counts and the skipped rows;
+    nothing is uploaded until that preview is confirmed.
+
+    Args:
+        csv_path: Path of the CSV file holding the upload rows, read on the
+            machine that runs AdLoop. The hosted server refuses this tool
+            rather than reading a path of its own.
+        default_region: ISO 3166-1 alpha-2 country assumed for phone numbers
+            that carry no country code, e.g. "DE" for "0151 12345678". Empty
+            leaves such numbers unusable; the row still uploads when its email
+            or its complete address identifies the lead.
+        consent: Consent signals for GDPR/EEA, as an object with "ad_user_data"
+            and/or "ad_personalization", each "GRANTED", "DENIED" or
+            "UNSPECIFIED". None sends UNSPECIFIED.
+        customer_id: Google Ads customer ID (digits, e.g. "1234567890"). Empty
+            uses the configured default account.
     """
     from adloop.ads.conversion_actions import (
         draft_upload_enhanced_conversions_for_leads as _impl,
