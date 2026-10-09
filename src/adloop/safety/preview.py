@@ -26,6 +26,30 @@ class ChangePlan:
     # from before the field existed still load) or "reddit".
     platform: str = ""
 
+    # Payload the applier needs but a preview must never show: an upload's rows
+    # (the caller id cannot be hashed, so call uploads carry raw phone numbers),
+    # or a row blob too bulky to be useful in a model's context. It is a
+    # separate field rather than a key inside ``changes`` so that "what may be
+    # shown" is decided in one place by construction, not by filtering each
+    # surface — the previous attempt at that filtering is exactly what let raw
+    # numbers reach a preview.
+    #
+    # A plan store must round-trip this field; a store that drops it makes the
+    # applier refuse loudly instead of uploading nothing quietly.
+    # `repr=False`: the payload holds raw caller ids, so a plan that ends up in
+    # a log line or a traceback must not print it.
+    apply_only_payload: dict[str, Any] = field(default_factory=dict, repr=False)
+
+    def apply_payload(self) -> dict[str, Any]:
+        """What the applier gets: ``changes`` with the apply-only payload merged in.
+
+        Keys of ``changes`` win on collision — the apply-only payload is the
+        data the summary in ``changes`` describes, never the other way round.
+        """
+        payload = dict(self.apply_only_payload)
+        payload.update(self.changes)
+        return payload
+
     def to_preview(self) -> dict[str, Any]:
         """Format as a human-readable preview dict for the AI to present."""
         return {
@@ -64,6 +88,17 @@ class PlanStore(Protocol):
 
     def remove(self, tenant: str, plan_id: str) -> None: ...
 
+    def claim(self, tenant: str, plan_id: str) -> ChangePlan | None:
+        """Take the plan out of the store in one atomic step.
+
+        An apply that is already running must not be started a second time: the
+        client times out, the model confirms again, and the upload goes out
+        twice. Claiming before the first request makes the second call find
+        nothing; a failure that provably happened before anything was sent can
+        put the plan back.
+        """
+        ...
+
 
 class InMemoryPlanStore:
     """Default store: plans live in process memory and expire on restart."""
@@ -83,6 +118,10 @@ class InMemoryPlanStore:
     def remove(self, tenant: str, plan_id: str) -> None:
         with self._lock:
             self._plans.pop((tenant, plan_id), None)
+
+    def claim(self, tenant: str, plan_id: str) -> ChangePlan | None:
+        with self._lock:
+            return self._plans.pop((tenant, plan_id), None)
 
 
 _active_store: PlanStore = InMemoryPlanStore()
@@ -117,3 +156,44 @@ def remove_plan(plan_id: str) -> None:
     from adloop.runtime import current_tenant
 
     _active_store.remove(current_tenant(), plan_id)
+
+
+_FALLBACK_WARNED = False
+
+
+def claim_plan(plan_id: str) -> ChangePlan | None:
+    """Atomically take a plan out of the store (see ``PlanStore.claim``).
+
+    ``claim`` is what a store should implement; a store that predates it gets
+    the non-atomic get-then-remove fallback rather than an AttributeError.
+
+    **The fallback is not safe against overlapping confirmations**: two calls
+    that interleave between ``get`` and ``remove`` both receive the plan and
+    both upload. It exists so an older custom store keeps working at all; the
+    hosted store implements ``claim``. The first use of the fallback logs a
+    warning once, so a deployment can see that it is running without the real
+    guarantee.
+    """
+    global _FALLBACK_WARNED
+
+    from adloop.runtime import current_tenant
+
+    tenant = current_tenant()
+    store = _active_store
+    claim = getattr(store, "claim", None)
+    if claim is not None:
+        return claim(tenant, plan_id)
+    if not _FALLBACK_WARNED:
+        _FALLBACK_WARNED = True
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Plan store %s has no claim(); falling back to get-then-remove, "
+            "which cannot stop two overlapping confirmations from both "
+            "uploading. Implement claim() on the store.",
+            type(store).__name__,
+        )
+    plan = store.get(tenant, plan_id)
+    if plan is not None:
+        store.remove(tenant, plan_id)
+    return plan

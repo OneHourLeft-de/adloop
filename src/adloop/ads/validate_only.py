@@ -28,7 +28,16 @@ _READ_METHODS = frozenset({"search", "search_stream"})
 
 
 class ValidateOnlyFailure(Exception):
-    """Google rejected part of a validate-only request (partial failure)."""
+    """Google rejected part of a validate-only request (partial failure).
+
+    Carries the ``partial_failure_error`` proto so callers can turn Google's
+    per-conversion errors into per-row messages — the same detail a real apply
+    gets from the response.
+    """
+
+    def __init__(self, message: str, *, failure: object = None) -> None:
+        super().__init__(message)
+        self.failure = failure
 
 
 class ValidateOnlyClient:
@@ -37,12 +46,21 @@ class ValidateOnlyClient:
     Everything except ``get_service`` passes through (enums, ``get_type``),
     and every service method except ``mutate*`` passes through too, so the
     reads some apply paths do before mutating still run normally.
+
+    ``is_validate_only`` marks this client for appliers that phrase their
+    errors differently when nothing can have been written.
     """
+
+    is_validate_only = True
 
     def __init__(self, client: object) -> None:
         self._client = client
         self.validated_calls = 0
         self.skipped_calls = 0
+        # Upload calls whose validate-only answer carried per-row problems.
+        # They are not failures: the real apply uploads the rows that match and
+        # reports the others, so the dry run reports the same thing.
+        self.partial_failures = 0
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._client, name)
@@ -80,7 +98,22 @@ class _ValidateOnlyService:
                 self._owner.validated_calls += 1
                 failure = getattr(response, "partial_failure_error", None)
                 if failure is not None and getattr(failure, "code", 0):
-                    raise ValidateOnlyFailure(getattr(failure, "message", "") or str(failure))
+                    if attr.startswith("upload"):
+                        # `partial_failure` is required for uploads (the proto
+                        # says "always set to true"), so a per-row problem is
+                        # not a broken request. Validate-only returns errors but
+                        # no results, so the placeholder results stand in and
+                        # the real failure proto rides along for the applier.
+                        self._owner.partial_failures += 1
+                        placeholder = _placeholder_response(
+                            request.customer_id, len(operations), False
+                        )
+                        placeholder.partial_failure_error = failure
+                        return placeholder
+                    raise ValidateOnlyFailure(
+                        getattr(failure, "message", "") or str(failure),
+                        failure=failure,
+                    )
 
             return _placeholder_response(request.customer_id, len(operations), attr == "mutate")
 

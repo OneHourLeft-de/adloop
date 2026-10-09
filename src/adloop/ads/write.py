@@ -2662,6 +2662,36 @@ def _extract_error_message(exc: Exception) -> str:
     return fallback if fallback else repr(exc)
 
 
+def _partial_upload_message(e: object) -> str:
+    """The human-readable half of a ``PARTIAL_UPLOAD`` answer.
+
+    The raw ``error`` and this message both reach the caller, so they must not
+    disagree about what is safe to do next. When a batch's fate is unknown the
+    message names exactly those CSV lines and tells the caller to check the
+    conversion action first. The resume hint names the first row of the *next*
+    batch, never the uncertain batch's own first line (that invites a
+    duplicate upload), and it is ``None`` when nothing follows.
+    """
+    if getattr(e, "unknown_status", False):
+        first, last = e.uncertain_lines
+        rest = (
+            f"Draft the remaining rows from line {e.resume_from_line}."
+            if e.resume_from_line is not None
+            else "No rows remain after these."
+        )
+        return (
+            f"{e.uncertain_rows} row(s) in lines {first}-{last} may or may not "
+            "have been received: check the conversion action for them first. "
+            f"{rest} The plan is no longer pending, so it cannot resend "
+            "anything."
+        )
+    return (
+        f"{e.sent_total} row(s) were sent; the plan is no longer pending, so "
+        "confirming it again cannot resend them. Resume the CSV at line "
+        f"{e.resume_from_line} and draft the rest as a new upload."
+    )
+
+
 def confirm_and_apply(
     config: AdLoopConfig,
     *,
@@ -2674,7 +2704,7 @@ def confirm_and_apply(
     to make real changes.
     """
     from adloop.safety.audit import log_mutation
-    from adloop.safety.preview import get_plan, remove_plan, store_plan
+    from adloop.safety.preview import claim_plan, get_plan, remove_plan, store_plan
 
     plan = get_plan(plan_id)
     if plan is None:
@@ -2689,6 +2719,9 @@ def confirm_and_apply(
 
     is_reddit = plan.operation.startswith("reddit_")
     platform_label = "Reddit Ads" if is_reddit else "Google Ads"
+    # ``plan.changes`` is the summary a preview may show; upload rows carry raw
+    # PII in ``plan.apply_only_payload``, which never reaches the audit log or
+    # a dry-run response.
 
     if dry_run:
         preflight_checks: dict | None = None
@@ -2708,6 +2741,22 @@ def confirm_and_apply(
                 validation = _validate_with_google(config, plan)
         except Exception as e:
             error_message = _extract_error_message(e)
+            # Google reports per-conversion errors by request index; the upload
+            # appliers translate them into CSV lines before raising.
+            from adloop.ads.conversion_actions import PartialUploadError
+            from adloop.ads.validate_only import ValidateOnlyFailure
+
+            row_errors = (
+                e.row_errors if isinstance(e, PartialUploadError) else []
+            )
+            # A validate-only partial failure is not a broken request: Google
+            # rejected some operations and the apply would carry out the rest.
+            # Saying "the real apply would fail the same way" is only true when
+            # the request as a whole was rejected.
+            partial_rejection = (
+                isinstance(e, ValidateOnlyFailure)
+                and getattr(e, "failure", None) is not None
+            )
             log_mutation(
                 config.safety.log_file,
                 operation=plan.operation,
@@ -2729,10 +2778,17 @@ def confirm_and_apply(
                 "plan_id": plan.plan_id,
                 "operation": plan.operation,
                 "error": error_message,
+                **({"row_errors": row_errors} if row_errors else {}),
                 "message": (
                     f"The dry run {checked_against} and found a problem; "
-                    "nothing was changed. The real apply would fail the same "
-                    "way. Fix the cause and draft again."
+                    "nothing was changed. "
+                    + (
+                        "Google rejected part of the request — the apply would "
+                        "carry out the rest and report these operations again. "
+                        if partial_rejection
+                        else "The real apply would fail the same way. "
+                    )
+                    + "Fix the cause and draft again."
                 ),
             }
         log_mutation(
@@ -2769,6 +2825,7 @@ def confirm_and_apply(
                 "target and re-checked the safety caps; nothing was sent."
             )
         if validation is not None:
+            row_errors = validation.pop("row_errors", [])
             response["checks"] = validation
             response["note"] = (
                 "Google Ads validated this exact change (validate_only) and "
@@ -2780,6 +2837,21 @@ def confirm_and_apply(
                     "objects an earlier step would create, so Google could "
                     "only validate the step(s) before them."
                 )
+            if row_errors:
+                # A per-row problem is not a broken request: the apply sends
+                # the file and reports those rows again. Say that here instead
+                # of letting the caller discover it at apply time.
+                response["row_errors"] = row_errors
+                # Only entries that name a CSV line are rows; the batch summary
+                # that Google's own message produces is not one.
+                per_row = [entry for entry in row_errors if "line" in entry]
+                response["note"] += (
+                    " Google reported problems "
+                    + (f"for {len(per_row)} row(s) " if per_row else "")
+                    + "in validate-only mode; the apply would send the file "
+                    "anyway and carry out every other row."
+                )
+
         from adloop.runtime import deployment_mode as _deployment_mode
 
         if forced_by_config and _deployment_mode() == "server":
@@ -2857,10 +2929,107 @@ def confirm_and_apply(
             ),
         }
 
+    # Claim the plan in one step so a second confirm while this one is still
+    # running finds nothing to execute — the client may have timed out while the
+    # first apply is happily uploading.
+    claimed = claim_plan(plan.plan_id)
+    if claimed is None:
+        return {
+            "status": "APPLY_IN_PROGRESS",
+            "plan_id": plan.plan_id,
+            "operation": plan.operation,
+            "error": (
+                f"Plan '{plan.plan_id}' is no longer pending: it is being "
+                "applied right now or has already been applied. That is not a "
+                "failure — wait for the first call to return, and check the "
+                "account for what arrived before drafting anything again. For "
+                "an upload, that check means the conversion action; for other "
+                "operations, read the affected entity back."
+            ),
+        }
+    plan = claimed
+
+    # From here on the upload appliers tell us whether a request actually went
+    # out; nothing below has to guess that from an exception type.
+    from adloop.ads.conversion_actions import reset_send_state, sent_anything
+
+    reset_send_state()
     try:
         result = _execute_plan(config, plan)
     except Exception as e:
         error_message = _extract_error_message(e)
+
+        # An upload that stopped mid-way has already changed the account for
+        # the batches that went through. Retire the plan: confirming it again —
+        # the obvious reflex after an error — would resend those rows, and call
+        # conversions have no dedup key to absorb the duplicates.
+        from adloop.ads.conversion_actions import PartialUploadError
+
+        # The plan stays usable unless a request may have reached Google. Only
+        # the applier knows that moment, so it marks it — and a request Google
+        # rejected outright wrote nothing, which the upload error says
+        # explicitly. Anything else may have arrived and must not be retried.
+        nothing_written = not sent_anything() or (
+            isinstance(e, PartialUploadError)
+            and not e.sent_total
+            and not e.unknown_status
+        )
+        if not plan.operation.startswith("upload_") or nothing_written:
+            store_plan(plan)
+
+        if isinstance(e, PartialUploadError) and (e.sent_total or e.unknown_status):
+            log_mutation(
+                config.safety.log_file,
+                operation=plan.operation,
+                customer_id=plan.customer_id,
+                entity_type=plan.entity_type,
+                entity_id=plan.entity_id,
+                changes=plan.changes,
+                dry_run=False,
+                result=(
+                    "unknown_status"
+                    if e.unknown_status
+                    else "partial_upload"
+                ),
+                error=error_message,
+            )
+            remove_plan(plan.plan_id)
+            # The message repeats what the raw error says, in the terms the
+            # caller has to act on. For an unknown outcome the two must agree:
+            # the uncertain batch is checked first, and the resume line points
+            # after it, never at its first row.
+            message = _partial_upload_message(e)
+            return {
+                "status": "PARTIAL_UPLOAD",
+                "plan_id": plan.plan_id,
+                "operation": plan.operation,
+                "error": error_message,
+                "sent_total": e.sent_total,
+                **(
+                    {
+                        "accepted_total": sum(b["accepted"] for b in e.batches),
+                        "rejected_total": sum(b["rejected"] for b in e.batches),
+                    }
+                    if e.batches
+                    and all(
+                        b.get("accepted") is not None
+                        and b.get("rejected") is not None
+                        for b in e.batches
+                    )
+                    else {}
+                ),
+                "batches": e.batches,
+                "resume_from_line": e.resume_from_line,
+                "unknown_status": e.unknown_status,
+                **(
+                    {"uncertain_lines": e.uncertain_lines}
+                    if e.uncertain_lines
+                    else {}
+                ),
+                **({"row_errors": e.row_errors} if e.row_errors else {}),
+                "message": message,
+            }
+
         log_mutation(
             config.safety.log_file,
             operation=plan.operation,
@@ -3653,8 +3822,21 @@ def _execute_plan(
 
         return _apply_create_key_event(config, plan.changes)
 
-    client = get_ads_client(config)
-    cid = normalize_customer_id(plan.customer_id)
+    try:
+        client = get_ads_client(config)
+        cid = normalize_customer_id(plan.customer_id)
+    except Exception as exc:  # noqa: BLE001 — uploads stay retryable
+        if plan.operation.startswith("upload_"):
+            # Credentials or client construction failed before anything could
+            # leave the process. Retiring the plan here would force a whole new
+            # draft for a retry that cannot have duplicated anything.
+            from adloop.ads.conversion_actions import UploadNotSentError
+
+            raise UploadNotSentError(
+                "Could not reach Google Ads for this upload, so nothing was "
+                f"sent and the plan is still usable: {exc}"
+            ) from exc
+        raise
 
     if validate_only:
         from adloop.ads.validate_only import ValidateOnlyClient
@@ -3665,10 +3847,17 @@ def _execute_plan(
         # result instead of raising; in a dry run that is still a failure.
         if isinstance(result, dict) and result.get("error"):
             raise ValueError(result["error"])
-        return {
+        validation = {
             "validated_calls": validator.validated_calls,
             "skipped_calls": validator.skipped_calls,
         }
+        # Uploads report per-row problems instead of failing the request (see
+        # ValidateOnlyClient), so their detail has to reach the caller.
+        if isinstance(result, dict) and result.get("row_errors"):
+            validation["row_errors"] = result["row_errors"]
+        if validator.partial_failures:
+            validation["partial_failures"] = validator.partial_failures
+        return validation
 
     return _dispatch_ads_plan(client, cid, plan)
 
@@ -3681,6 +3870,8 @@ def _dispatch_ads_plan(client: object, cid: str, plan: object) -> dict:
         _apply_create_conversion_action,
         _apply_remove_conversion_action,
         _apply_update_conversion_action,
+        _apply_upload_call_conversions,
+        _apply_upload_enhanced_conversions_for_leads,
     )
     # Custom conversion goals live in their own module for the same reason.
     from adloop.ads.custom_conversion_goals import (
@@ -3725,6 +3916,10 @@ def _dispatch_ads_plan(client: object, cid: str, plan: object) -> dict:
         "create_conversion_action": _apply_create_conversion_action,
         "update_conversion_action": _apply_update_conversion_action,
         "remove_conversion_action": _apply_remove_conversion_action,
+        "upload_call_conversions": _apply_upload_call_conversions,
+        "upload_enhanced_conversions_for_leads": (
+            _apply_upload_enhanced_conversions_for_leads
+        ),
     }
 
     handler = dispatch.get(plan.operation)
@@ -3743,7 +3938,7 @@ def _dispatch_ads_plan(client: object, cid: str, plan: object) -> dict:
     if plan.operation == "remove_entity":
         return handler(client, cid, plan.entity_type, plan.entity_id)
 
-    return handler(client, cid, plan.changes)
+    return handler(client, cid, plan.apply_payload())
 
 
 def _apply_update_ad_group(client: object, cid: str, changes: dict) -> dict:

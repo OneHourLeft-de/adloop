@@ -121,8 +121,11 @@ def _build_orchestration_instructions() -> str:
         "enabled but cannot serve until one of its (paused) ads is enabled. "
         "The user must enable them after review.\n"
         "- A Google Ads dry run sends the exact change to Google with "
-        "validate_only (nothing executes); DRY_RUN_FAILED means the real "
-        "apply would fail the same way.\n"
+        "validate_only (nothing executes); DRY_RUN_FAILED means Google "
+        "rejected the request, so nothing was changed and the apply would be "
+        "rejected too. Per-row problems in an upload are not a rejection: they "
+        "come back as `row_errors` with DRY_RUN_SUCCESS, and the apply would "
+        "carry out the other rows.\n"
         "- One change at a time — don't batch unrelated writes.\n\n"
         "PRE-WRITE CHECKS (before any `draft_*`):\n"
         "- BROAD match keywords require Smart Bidding (MAXIMIZE_CONVERSIONS, "
@@ -3136,10 +3139,21 @@ def confirm_and_apply(
     Reddit plans: Reddit has no validate-only mode, so the dry run re-reads
     the target entity and re-checks the safety caps (returned as `checks`).
 
-    Either way, a DRY_RUN_FAILED result means the real apply would also fail.
-    Returns a status (DRY_RUN_SUCCESS, DRY_RUN_FAILED, DRY_RUN_REQUIRED or
-    APPLIED) with the plan_id and operation; APPLIED results carry the created
-    or changed resource names under 'result'.
+    A DRY_RUN_FAILED result means the change does not go through as previewed.
+    The real apply fails the same way, unless Google rejected only part of the
+    request: then it carries out the rest and reports those operations again.
+
+    Returns a status with the plan_id and operation: DRY_RUN_SUCCESS,
+    DRY_RUN_FAILED, DRY_RUN_REQUIRED, APPLIED, PARTIAL_UPLOAD or
+    APPLY_IN_PROGRESS. APPLIED results carry the created or changed resource
+    names under 'result'. PARTIAL_UPLOAD belongs to the upload tools: the
+    batches it lists are already in the account, so the plan is retired.
+    'sent_total', 'accepted_total', 'rejected_total' and 'resume_from_line'
+    say how far the upload got and at which CSV line a new draft continues;
+    when a batch's fate is unknown, 'unknown_status', 'uncertain_lines' and
+    'row_errors' name the rows whose outcome has to be checked first.
+    APPLY_IN_PROGRESS means an earlier call claimed this plan first, so this
+    call executed nothing.
 
     Args:
         plan_id: The plan_id returned by a prior draft_*, update_*, add_*,
@@ -4411,6 +4425,123 @@ def draft_remove_conversion_action(
         current_config(),
         customer_id=customer_id or current_config().ads.customer_id,
         conversion_action_id=conversion_action_id,
+    )
+
+
+@_tool(title="Draft call conversion upload", annotations=_WRITE, tags={"ads"})
+@_safe
+def draft_upload_call_conversions(
+    csv_path: str,
+    default_region: str = "",
+    consent: dict | None = None,
+    customer_id: str = "",
+) -> dict:
+    """Draft an offline CALL-conversion upload from a CSV — returns a PREVIEW.
+
+    Uploads call conversions via ConversionUploadService.UploadCallConversions,
+    matching the call against the ad click by the caller's phone number.
+    The CSV must have columns: Caller's Phone Number,
+    Call Start Time, Conversion Name, Conversion Time, Conversion Value,
+    Conversion Currency. The Conversion Name must match an existing
+    UPLOAD_CALLS-type conversion action — verified against the account while
+    drafting, so a typo fails here rather than after the upload.
+
+    Local file only: on the hosted server this tool refuses, because it would
+    read a path on the server rather than the caller's machine.
+
+    PII: the caller phone number is required RAW by Google (it cannot be
+    hashed), so it lives in the plan's apply-only payload — the preview shows
+    redacted ids and counts, the audit log and `plan.changes` show neither.
+    Apply uploads exactly what you previewed (no CSV re-read).
+
+    Phone numbers are normalized with libphonenumber semantics: a number
+    carries no country code needs ``default_region``, an extension is dropped,
+    and the German trunk marker in "+49 (0)89 …" is handled. Rows whose number
+    stays unusable are skipped and reported in `skipped_rows` instead of being
+    uploaded to no effect.
+
+    Returns a preview with a plan_id, the row counts and the skipped rows;
+    nothing is uploaded until that preview is confirmed.
+
+    Args:
+        csv_path: Path of the CSV file holding the upload rows, read on the
+            machine that runs AdLoop. The hosted server refuses this tool
+            rather than reading a path of its own.
+        default_region: ISO 3166-1 alpha-2 country assumed for phone numbers
+            that carry no country code, e.g. "DE" for "0151 12345678". Empty
+            leaves such numbers unusable and the row is skipped.
+        consent: Consent signals for GDPR/EEA, as an object with "ad_user_data"
+            and/or "ad_personalization", each "GRANTED", "DENIED" or
+            "UNSPECIFIED". None sends UNSPECIFIED.
+        customer_id: Google Ads customer ID (digits, e.g. "1234567890"). Empty
+            uses the configured default account.
+    """
+    from adloop.ads.conversion_actions import (
+        draft_upload_call_conversions as _impl,
+    )
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        csv_path=csv_path,
+        default_region=default_region,
+        consent=consent,
+    )
+
+
+@_tool(title="Draft enhanced conversions upload", annotations=_WRITE, tags={"ads"})
+@_safe
+def draft_upload_enhanced_conversions_for_leads(
+    csv_path: str,
+    default_region: str = "",
+    consent: dict | None = None,
+    customer_id: str = "",
+) -> dict:
+    """Draft an Enhanced Conversions for LEADS upload from a CSV — PREVIEW.
+
+    Uploads lead conversions via
+    ConversionUploadService.UploadClickConversions with user_identifiers,
+    matching hashed customer PII back to the Google users who clicked the ads.
+    The CSV holds RAW PII in columns: Email, Phone
+    Number, First Name, Last Name (plus Conversion Name, Conversion Time,
+    Conversion Value, Conversion Currency; optional Order ID dedup key).
+
+    PII is normalized and SHA-256-hashed AT PREVIEW TIME — only the hashes are
+    stored in the plan. Raw email/phone/name never land in the plan or the
+    audit log. The target conversion action must be UPLOAD_CLICKS-type.
+
+    An Order ID column makes re-uploads dedup instead of double-counting.
+
+    Local file only: on the hosted server this tool refuses, because it would
+    read a path on the server rather than the caller's machine.
+
+    Returns a preview with a plan_id, the row counts and the skipped rows;
+    nothing is uploaded until that preview is confirmed.
+
+    Args:
+        csv_path: Path of the CSV file holding the upload rows, read on the
+            machine that runs AdLoop. The hosted server refuses this tool
+            rather than reading a path of its own.
+        default_region: ISO 3166-1 alpha-2 country assumed for phone numbers
+            that carry no country code, e.g. "DE" for "0151 12345678". Empty
+            leaves such numbers unusable; the row still uploads when its email
+            or its complete address identifies the lead.
+        consent: Consent signals for GDPR/EEA, as an object with "ad_user_data"
+            and/or "ad_personalization", each "GRANTED", "DENIED" or
+            "UNSPECIFIED". None sends UNSPECIFIED.
+        customer_id: Google Ads customer ID (digits, e.g. "1234567890"). Empty
+            uses the configured default account.
+    """
+    from adloop.ads.conversion_actions import (
+        draft_upload_enhanced_conversions_for_leads as _impl,
+    )
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        csv_path=csv_path,
+        default_region=default_region,
+        consent=consent,
     )
 
 
