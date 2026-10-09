@@ -652,6 +652,41 @@ class TestPublish:
         result = draft_publish_gtm_workspace(_config(tmp_path), **_ids())
         assert result["status"] == "PENDING_CONFIRMATION"
 
+    def test_a_template_only_workspace_is_not_reported_as_empty(
+        self, tmp_path, fake
+    ):
+        """A workspace whose only change is a custom template has work to do."""
+        from adloop.gtm.write import draft_publish_gtm_workspace
+
+        fake.status = {"workspaceChange": [
+            _change("customTemplate", "7", name="Call tracking"),
+        ]}
+        preview = draft_publish_gtm_workspace(_config(tmp_path), **_ids())
+        pending = preview["changes"]["pending_changes"]
+        assert [c["entity_kind"] for c in pending] == ["customTemplate"]
+        assert pending[0]["name"] == "Call tracking"
+
+    @pytest.mark.parametrize("kind", ["customTemplate", "gtagConfig"])
+    def test_a_change_outside_tags_pins_the_digest(self, tmp_path, fake, kind):
+        """Every Entity kind counts: a template added in the GTM UI after the
+        preview must not go live through the publish."""
+        from adloop.gtm.write import draft_publish_gtm_workspace
+
+        fake.status = {"workspaceChange": [
+            _change("tag", "1", name="GA4", type="gaawe"),
+        ]}
+        cfg = _config(tmp_path)
+        preview = draft_publish_gtm_workspace(cfg, **_ids())
+
+        fake.status["workspaceChange"].append(
+            _change(kind, "7", name="Added in the UI")
+        )
+        result = _apply(cfg, preview["plan_id"])
+        assert "differ from what was previewed" in result["error"]
+        assert not [
+            c for c in fake.calls if c[0] in ("create_version", "publish")
+        ]
+
     def test_publish_happy_path(self, tmp_path, fake):
         from adloop.gtm.write import draft_publish_gtm_workspace
 

@@ -79,7 +79,8 @@ _TRIGGER_FIELDS = {
 }
 
 _ENTITY_KINDS = ("tag", "trigger", "variable", "folder", "client",
-                 "transformation", "zone", "builtInVariable")
+                 "transformation", "zone", "builtInVariable",
+                 "customTemplate", "gtagConfig")
 
 
 # ---------------------------------------------------------------------------
