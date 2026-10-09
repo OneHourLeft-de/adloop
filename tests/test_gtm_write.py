@@ -612,9 +612,15 @@ class TestDelete:
 # ---------------------------------------------------------------------------
 
 
+# The id field each Entity kind carries, as the v2 discovery document defines
+# it: a custom template calls its id ``templateId``.
+_ENTITY_ID_FIELDS = {"customTemplate": "templateId"}
+
+
 def _change(kind, entity_id, status="added", **extra):
     return {"changeStatus": status,
-            kind: {f"{kind}Id": entity_id, "fingerprint": "f", **extra}}
+            kind: {_ENTITY_ID_FIELDS.get(kind, f"{kind}Id"): entity_id,
+                   "fingerprint": "f", **extra}}
 
 
 class TestPublish:
@@ -681,6 +687,8 @@ class TestPublish:
         preview = draft_publish_gtm_workspace(_config(tmp_path), **_ids())
         pending = preview["changes"]["pending_changes"]
         assert [c["entity_kind"] for c in pending] == ["customTemplate"]
+        # The id comes from ``templateId``, the field the API actually sends.
+        assert pending[0]["entity_id"] == "7"
         assert pending[0]["name"] == "Call tracking"
 
     @pytest.mark.parametrize("kind", ["customTemplate", "gtagConfig"])

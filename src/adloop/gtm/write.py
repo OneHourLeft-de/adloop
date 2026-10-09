@@ -82,10 +82,21 @@ _ENTITY_KINDS = ("tag", "trigger", "variable", "folder", "client",
                  "transformation", "zone", "builtInVariable",
                  "customTemplate", "gtagConfig")
 
+# The field carrying a kind's own id inside the Entity wrapper. A custom
+# template names it ``templateId`` (v2 discovery document), every other kind
+# follows ``<kind>Id``; a built-in variable has no id and falls back to its
+# name.
+_ENTITY_ID_FIELDS = {"customTemplate": "templateId"}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _entity_id(kind: str, entity: dict) -> str:
+    field = _ENTITY_ID_FIELDS.get(kind, f"{kind}Id")
+    return str(entity.get(field) or entity.get("name") or "")
 
 
 def _require_writes(config: AdLoopConfig) -> None:
@@ -271,7 +282,7 @@ def _workspace_digest(status: dict) -> str:
                 entity = change[kind]
                 items.append([
                     kind,
-                    str(entity.get(f"{kind}Id") or entity.get("name") or ""),
+                    _entity_id(kind, entity),
                     change.get("changeStatus", ""),
                     str(entity.get("fingerprint", "")),
                 ])
@@ -288,7 +299,9 @@ def _summarize_changes(status: dict) -> list[dict]:
                 out.append({
                     "change_status": change.get("changeStatus"),
                     "entity_kind": kind,
-                    "entity_id": entity.get(f"{kind}Id"),
+                    "entity_id": entity.get(
+                        _ENTITY_ID_FIELDS.get(kind, f"{kind}Id")
+                    ),
                     "name": entity.get("name"),
                     "type": entity.get("type"),
                     "paused": entity.get("paused"),
