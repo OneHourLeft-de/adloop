@@ -56,19 +56,13 @@ DASHBOARD = "the AdLoop Cloud dashboard at getadloop.com"
 SKILL_FRONTMATTER = """\
 ---
 name: adloop
-description: >-
-  Orchestration and safety rules for AdLoop Cloud's Google Ads, Reddit Ads and
-  Google Analytics (GA4) tools, plus Search Console, Tag Manager and Merchant
-  Center. Use whenever the user works on Google Ads, GA4, Reddit Ads or their
-  tracking through AdLoop: performance reviews and account audits, search terms
-  and negative keywords, keyword research and budget planning, new campaigns,
-  ad groups or ads, conversion tracking and attribution checks, and before any
-  AdLoop draft_* tool or confirm_and_apply call.
+description: "Orchestration and safety rules for AdLoop Cloud's Google Ads, Reddit Ads and Google Analytics (GA4) tools, plus Search Console, Tag Manager and Merchant Center. Use whenever the user works on Google Ads, GA4, Reddit Ads or their tracking through AdLoop: performance reviews and account audits, search terms and negative keywords, keyword research and budget planning, new campaigns, ad groups or ads, conversion tracking and attribution checks, and before any AdLoop draft_* tool or confirm_and_apply call."
 ---
 """
 
 CURSOR_FRONTMATTER = """\
 ---
+name: adloop-rules
 description: AdLoop Cloud orchestration and safety rules for Google Ads, Reddit Ads and GA4 (Google Analytics). Apply when using AdLoop MCP tools, analyzing ad or analytics performance, or before any AdLoop draft_* or confirm_and_apply call.
 globs:
 alwaysApply: false
