@@ -17,7 +17,10 @@ Three gates sit on top of that, all enforced here rather than advised:
 * ``gtm.allow_custom_html`` — Custom HTML tags run arbitrary JavaScript on
   every page they fire on. Creating or editing one, or publishing a
   workspace that adds or changes one, is refused unless this is on. Pausing
-  or deleting one is always allowed (both reduce what runs).
+  or deleting one is always allowed (both reduce what runs). The gate matches
+  the tag type ``html``: a Custom JavaScript variable or a custom template
+  tag (``cvt_…``), which can inject a script, is not covered and has to be
+  reviewed in the GTM UI.
 * Concurrency — every update/delete pins the entity fingerprint read at draft
   time, and publish pins a digest of the workspace's pending changes. If a
   human edits the container between preview and apply, apply refuses instead

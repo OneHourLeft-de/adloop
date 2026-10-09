@@ -2043,7 +2043,9 @@ def draft_publish_gtm_workspace(
     being added or changed while gtm.allow_custom_html is off. Refused unless
     gtm.write_enabled is set. Returns the pending changes, the version that
     is live now (for a one-step rollback), the version name that would be
-    created and a plan_id.
+    created and a plan_id. That gate matches the tag type html; a Custom
+    JavaScript variable or a custom template tag (cvt_…), which can inject a
+    script, is not covered and needs review in the GTM UI.
 
     Args:
         version_name: Name of the container version created by the publish.
