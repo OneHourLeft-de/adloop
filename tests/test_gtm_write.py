@@ -227,6 +227,26 @@ class TestOptIn:
                           name="x", tag_type="gaawe")
         assert fake.calls == []
 
+    def test_hosted_writes_disabled_points_at_the_adloop_cloud_side(
+        self, tmp_path, fake
+    ):
+        """Hosted users have no config file to edit and no server to restart."""
+        from adloop import runtime
+        from adloop.gtm.write import draft_gtm_tag
+
+        runtime.set_deployment_mode("server")
+        try:
+            with pytest.raises(RuntimeError) as excinfo:
+                draft_gtm_tag(_config(tmp_path, write=False), **_ids(),
+                              name="x", tag_type="gaawe")
+        finally:
+            runtime.set_deployment_mode("local")
+
+        message = str(excinfo.value)
+        assert "AdLoop Cloud" in message
+        # Nothing for the user to edit or restart on the hosted side.
+        assert "restart the MCP server" not in message
+
     @pytest.mark.parametrize("raw,expected", [
         ("true", True), (True, True), ("yes", True),
         ("false", False), (False, False), ("no", False), ("", False), (None, False),

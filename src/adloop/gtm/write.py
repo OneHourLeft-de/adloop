@@ -87,6 +87,17 @@ _TRIGGER_FIELDS = {
 
 def _require_writes(config: AdLoopConfig) -> None:
     if not config.gtm.write_enabled:
+        from adloop.runtime import deployment_mode
+
+        if deployment_mode() == "server":
+            # Hosted: there is no config file for the user to edit and no
+            # server for them to restart — the flag is set on the AdLoop Cloud
+            # side, by whoever runs that deployment.
+            raise RuntimeError(
+                "GTM writes are disabled for this workspace. They are enabled "
+                "on the AdLoop Cloud side; turning them on also asks for a "
+                "re-consent with the Tag Manager edit + publish scopes."
+            )
         raise RuntimeError(
             "GTM writes are disabled. Set 'write_enabled: true' under 'gtm:' "
             "in the AdLoop config and restart the MCP server; the next call "
