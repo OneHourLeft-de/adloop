@@ -2908,6 +2908,10 @@ class TestPartialUploadRetiresThePlan:
 
         assert result["status"] == "PARTIAL_UPLOAD", result
         assert result["sent_total"] == 2000
+        # The ledger's counts are summed for the caller, the same way the
+        # apply result reports them: batch 1 sent 2,000 rows, all matched.
+        assert result["accepted_total"] == 2000
+        assert result["rejected_total"] == 0
         assert result["batches"][0]["first_source_line"] == 2   # header is line 1
         assert result["batches"][0]["last_source_line"] == 2001
         assert result["resume_from_line"] == 2002                # first line of batch 2
@@ -4328,7 +4332,7 @@ class TestUnreadableResponseAndTimeZoneRows:
         assert result["status"] == "PARTIAL_UPLOAD", result
         assert result["unknown_status"] is True
         # The request went out but its answer could not be read, so the batch
-        # is uncertain, not uploaded: ``uploaded_total`` counts only what is
+        # is uncertain, not uploaded: ``sent_total`` counts only what is
         # proven to be in.
         assert result["sent_total"] == 0
         assert result["uncertain_lines"] == [2, 4]

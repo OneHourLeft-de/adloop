@@ -3139,15 +3139,21 @@ def confirm_and_apply(
     Reddit plans: Reddit has no validate-only mode, so the dry run re-reads
     the target entity and re-checks the safety caps (returned as `checks`).
 
-    Either way, a DRY_RUN_FAILED result means the real apply would also fail.
+    A DRY_RUN_FAILED result means the change does not go through as previewed.
+    The real apply fails the same way, unless Google rejected only part of the
+    request: then it carries out the rest and reports those operations again.
+
     Returns a status with the plan_id and operation: DRY_RUN_SUCCESS,
     DRY_RUN_FAILED, DRY_RUN_REQUIRED, APPLIED, PARTIAL_UPLOAD or
     APPLY_IN_PROGRESS. APPLIED results carry the created or changed resource
-    names under 'result'. PARTIAL_UPLOAD belongs to the upload tools: earlier
-    batches are already in the account, and 'sent_total', 'batches' and
-    'resume_from_line' say how far the upload got and at which CSV line a new
-    draft starts. APPLY_IN_PROGRESS means an earlier call claimed this plan
-    first, so this call executed nothing.
+    names under 'result'. PARTIAL_UPLOAD belongs to the upload tools: the
+    batches it lists are already in the account, so the plan is retired.
+    'sent_total', 'accepted_total', 'rejected_total' and 'resume_from_line'
+    say how far the upload got and at which CSV line a new draft continues;
+    when a batch's fate is unknown, 'unknown_status', 'uncertain_lines' and
+    'row_errors' name the rows whose outcome has to be checked first.
+    APPLY_IN_PROGRESS means an earlier call claimed this plan first, so this
+    call executed nothing.
 
     Args:
         plan_id: The plan_id returned by a prior draft_*, update_*, add_*,

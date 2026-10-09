@@ -3006,9 +3006,16 @@ def confirm_and_apply(
                 "error": error_message,
                 "sent_total": e.sent_total,
                 **(
-                    {"accepted_total": sum(b["accepted"] for b in e.batches)}
+                    {
+                        "accepted_total": sum(b["accepted"] for b in e.batches),
+                        "rejected_total": sum(b["rejected"] for b in e.batches),
+                    }
                     if e.batches
-                    and all(b.get("accepted") is not None for b in e.batches)
+                    and all(
+                        b.get("accepted") is not None
+                        and b.get("rejected") is not None
+                        for b in e.batches
+                    )
                     else {}
                 ),
                 "batches": e.batches,
