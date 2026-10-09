@@ -308,6 +308,18 @@ def _custom_html_changes(status: dict) -> list[dict]:
     ]
 
 
+def _custom_html_pending_changes(pending: list[dict]) -> list[dict]:
+    """The same check against a stored preview's summarized pending changes."""
+    return [
+        {"tag_id": c.get("entity_id"), "name": c.get("name"),
+         "change_status": c.get("change_status")}
+        for c in pending
+        if c.get("entity_kind") == "tag"
+        and c.get("type") == CUSTOM_HTML
+        and c.get("change_status") != "deleted"
+    ]
+
+
 def _translate_http_error(exc: Exception) -> Exception:
     """Turn a missing-scope 403 into an actionable error; pass others through."""
     text = str(exc).lower()
@@ -768,13 +780,22 @@ def _check_gates(config: AdLoopConfig, plan: ChangePlan) -> None:
         return
     changes = plan.changes
     op = plan.operation
-    html = (
-        (op == "gtm_create_tag" and changes["tag"].get("type") == CUSTOM_HTML)
-        or (op == "gtm_update_tag" and changes.get("tag_type") == CUSTOM_HTML
-            and changes["patch"] != {"paused": True})
-    )
+    if op == "gtm_publish_workspace":
+        # The publish draft checked the live workspace, but the flag can be
+        # switched off in between and an apply needs no dry run, so the stored
+        # preview is checked here as well.
+        html = bool(
+            _custom_html_pending_changes(changes.get("pending_changes") or [])
+        )
+    elif op == "gtm_update_tag":
+        html = (changes.get("tag_type") == CUSTOM_HTML
+                and changes["patch"] != {"paused": True})
+    else:
+        html = op == "gtm_create_tag" and changes["tag"].get("type") == CUSTOM_HTML
     if html:
-        raise RuntimeError(_custom_html_refusal("this plan")["error"])
+        what = ("publishing this workspace" if op == "gtm_publish_workspace"
+                else "this plan")
+        raise RuntimeError(_custom_html_refusal(what)["error"])
 
 
 def preflight(config: AdLoopConfig, plan: ChangePlan) -> dict:

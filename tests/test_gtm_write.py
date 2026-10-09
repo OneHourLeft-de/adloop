@@ -652,6 +652,23 @@ class TestPublish:
         result = draft_publish_gtm_workspace(_config(tmp_path), **_ids())
         assert result["status"] == "PENDING_CONFIRMATION"
 
+    def test_the_custom_html_gate_is_rechecked_at_apply(self, tmp_path, fake):
+        """The flag can be switched off after the draft, and an apply needs no
+        dry run, so the stored preview has to be checked again."""
+        from adloop.gtm.write import draft_publish_gtm_workspace
+
+        fake.status = {"workspaceChange": [
+            _change("tag", "9", status="updated", name="Chat widget", type="html"),
+        ]}
+        preview = draft_publish_gtm_workspace(_config(tmp_path, html=True), **_ids())
+        assert preview["status"] == "PENDING_CONFIRMATION"
+
+        result = _apply(_config(tmp_path), preview["plan_id"])
+        assert "involves a Custom HTML tag" in result["error"]
+        assert not [
+            c for c in fake.calls if c[0] in ("create_version", "publish")
+        ]
+
     def test_a_template_only_workspace_is_not_reported_as_empty(
         self, tmp_path, fake
     ):
