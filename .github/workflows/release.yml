@@ -59,3 +59,34 @@ jobs:
           else
             gh release create "${{ github.ref_name }}" --generate-notes
           fi
+
+  mcp-registry:
+    # After PyPI: the registry checks that the package version it lists
+    # exists there. Publishes server.json under com.getadloop with the DNS
+    # key for getadloop.com, so no manual mcp-publisher login is needed.
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check server.json matches the tag
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(jq -r .version server.json)"
+          package="$(jq -r '.packages[0].version' server.json)"
+          if [ "$version" != "$tag" ] || [ "$package" != "$tag" ]; then
+            echo "server.json says $version / $package, tag is $tag" >&2
+            exit 1
+          fi
+
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL https://github.com/modelcontextprotocol/registry/releases/download/v1.8.1/mcp-publisher_linux_amd64.tar.gz \
+            | tar xz mcp-publisher
+
+      - name: Publish to the MCP registry
+        env:
+          MCP_REGISTRY_PRIVATE_KEY: ${{ secrets.MCP_REGISTRY_PRIVATE_KEY }}
+        run: |
+          ./mcp-publisher login dns --domain getadloop.com --private-key "$MCP_REGISTRY_PRIVATE_KEY"
+          ./mcp-publisher publish
