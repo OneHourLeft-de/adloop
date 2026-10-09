@@ -30,7 +30,7 @@ TOOLSETS: dict[str, str] = {
     "ads": "Google Ads reads, writes, and planning",
     "ga4": "Google Analytics reads and key events",
     "tracking": "Cross-channel attribution and tracking code",
-    "gtm": "Google Tag Manager reads",
+    "gtm": "Google Tag Manager reads and (opt-in) writes",
     "gsc": "Search Console reads",
     "web": "PageSpeed / web performance",
     "merchant": "Merchant Center reads",
@@ -1828,6 +1828,250 @@ def get_gtm_version(
         account_id=gtm_account_id,
         container_id=gtm_container_id,
         container_version_id=container_version_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Google Tag Manager — writes (opt-in: gtm.write_enabled)
+# ---------------------------------------------------------------------------
+
+
+@_tool(title="Draft a Tag Manager tag", annotations=_WRITE, tags={"gtm"})
+@_safe
+def draft_gtm_tag(
+    name: str = "",
+    tag_type: str = "",
+    parameters: _DictListOpt = None,
+    firing_trigger_ids: _StrListOpt = None,
+    blocking_trigger_ids: _StrListOpt = None,
+    paused: bool | None = None,
+    notes: str | None = None,
+    tag_id: str = "",
+    workspace_id: str = "",
+    gtm_account_id: str = "",
+    gtm_container_id: str = "",
+) -> dict:
+    """Draft creating or updating a Tag Manager tag — returns a PREVIEW.
+
+    Without tag_id this creates a tag in a workspace; with tag_id it updates
+    the existing tag. The edit lands in the workspace and changes nothing on
+    the site until the workspace is published. Refused unless
+    gtm.write_enabled is set, and Custom HTML (html) is refused as well
+    unless gtm.allow_custom_html is set. Returns the resolved workspace, the
+    tag type, the fields that would change and a plan_id.
+
+    Args:
+        name: Tag name, 1-200 characters. Required when creating a tag.
+        tag_type: Tag type, required when creating a tag because GTM cannot
+            change a tag's type later: googtag, gaawe (GA4 event), awct (Ads
+            conversion), awcc, awud, sp (Ads remarketing), gclidw, flc, fls,
+            img, html (Custom HTML) or cvt_<id> for a Community Gallery
+            template.
+        parameters: GTM parameter dicts with at least "type" and "key", for
+            example gaawe [{"type": "TEMPLATE", "key": "eventName", "value":
+            "form_submit"}] or awct [{"type": "TEMPLATE", "key":
+            "conversionId", "value": "123456789"}, {"type": "TEMPLATE",
+            "key": "conversionLabel", "value": "AbC-dEf"}]. On update they
+            merge by key: passed keys replace, other keys stay.
+        firing_trigger_ids: Trigger IDs that fire the tag (see
+            list_gtm_triggers). The built-in All Pages trigger is
+            "2147479553".
+        blocking_trigger_ids: Trigger IDs that must not fire the tag.
+        paused: True stores the tag paused instead of deleting it. None keeps
+            the current state.
+        notes: Free-form note stored on the tag. None keeps the current note.
+        tag_id: Existing tag ID to update (see list_gtm_tags). Empty creates
+            a new tag.
+        workspace_id: Workspace to edit (see list_gtm_workspaces). Empty uses
+            the Default Workspace, or the only workspace there is.
+        gtm_account_id: Numeric GTM account ID (see list_gtm_accounts). Empty
+            uses gtm.account_id from the config.
+        gtm_container_id: Numeric GTM container ID (see list_gtm_containers).
+            Empty uses gtm.container_id from the config.
+    """
+    from adloop.gtm.write import draft_gtm_tag as _impl
+
+    gtm_account_id, gtm_container_id = _gtm_defaults(gtm_account_id, gtm_container_id)
+    return _impl(
+        current_config(),
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        tag_id=tag_id,
+        workspace_id=workspace_id,
+        name=name,
+        tag_type=tag_type,
+        parameters=parameters,
+        firing_trigger_ids=firing_trigger_ids,
+        blocking_trigger_ids=blocking_trigger_ids,
+        paused=paused,
+        notes=notes,
+    )
+
+
+@_tool(title="Draft a Tag Manager trigger", annotations=_WRITE, tags={"gtm"})
+@_safe
+def draft_gtm_trigger(
+    name: str = "",
+    trigger_type: str = "",
+    custom_event_name: str = "",
+    filters: _DictListOpt = None,
+    custom_event_filters: _DictListOpt = None,
+    auto_event_filters: _DictListOpt = None,
+    parameters: _DictListOpt = None,
+    notes: str | None = None,
+    trigger_id: str = "",
+    workspace_id: str = "",
+    gtm_account_id: str = "",
+    gtm_container_id: str = "",
+) -> dict:
+    """Draft creating or updating a Tag Manager trigger — returns a PREVIEW.
+
+    Without trigger_id this creates a trigger in a workspace; with trigger_id
+    it updates the existing one. The edit lands in the workspace and changes
+    nothing on the site until the workspace is published. Refused unless
+    gtm.write_enabled is set. Returns the resolved workspace, the trigger
+    fields that would change and a plan_id.
+
+    Args:
+        name: Trigger name, 1-200 characters. Required when creating a
+            trigger.
+        trigger_type: Trigger type, required when creating a trigger and
+            rejected on an existing one, because GTM cannot change it later:
+            pageview, domReady, windowLoaded, click, linkClick,
+            formSubmission, customEvent, elementVisibility, scrollDepth,
+            youTubeVideo, historyChange, timer, jsError or triggerGroup.
+        custom_event_name: The dataLayer event name. Required for trigger type
+            customEvent, rejected for every other type, and rejected on an
+            existing trigger, where the event name sits in its custom event
+            filter.
+        filters: GTM conditions, each a dict with "type" (EQUALS, CONTAINS,
+            MATCH_REGEX, ...) and "parameter" (arg0 = variable, arg1 =
+            value), for example clicks on tel: links [{"type": "CONTAINS",
+            "parameter": [{"type": "TEMPLATE", "key": "arg0", "value":
+            "{{Click URL}}"}, {"type": "TEMPLATE", "key": "arg1", "value":
+            "tel:"}]}]. On update the list replaces the existing one.
+        custom_event_filters: Conditions on custom event parameters, same
+            shape as filters. On update the list replaces the existing one.
+        auto_event_filters: Conditions on automatic event parameters, same
+            shape as filters. On update the list replaces the existing one.
+        parameters: GTM parameter dicts with at least "type" and "key". On
+            update they merge by key: passed keys replace, other keys stay.
+        notes: Free-form note stored on the trigger. None keeps the current
+            note.
+        trigger_id: Existing trigger ID to update (see list_gtm_triggers).
+            Empty creates a new trigger.
+        workspace_id: Workspace to edit (see list_gtm_workspaces). Empty uses
+            the Default Workspace, or the only workspace there is.
+        gtm_account_id: Numeric GTM account ID (see list_gtm_accounts). Empty
+            uses gtm.account_id from the config.
+        gtm_container_id: Numeric GTM container ID (see list_gtm_containers).
+            Empty uses gtm.container_id from the config.
+    """
+    from adloop.gtm.write import draft_gtm_trigger as _impl
+
+    gtm_account_id, gtm_container_id = _gtm_defaults(gtm_account_id, gtm_container_id)
+    return _impl(
+        current_config(),
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        trigger_id=trigger_id,
+        workspace_id=workspace_id,
+        name=name,
+        trigger_type=trigger_type,
+        custom_event_name=custom_event_name,
+        filters=filters,
+        custom_event_filters=custom_event_filters,
+        auto_event_filters=auto_event_filters,
+        parameters=parameters,
+        notes=notes,
+    )
+
+
+@_tool(title="Draft deleting a Tag Manager tag or trigger", annotations=_DESTRUCTIVE, tags={"gtm"})
+@_safe
+def draft_delete_gtm_entity(
+    entity_type: str,
+    entity_id: str,
+    workspace_id: str = "",
+    gtm_account_id: str = "",
+    gtm_container_id: str = "",
+) -> dict:
+    """Draft deleting a Tag Manager tag or trigger — returns a PREVIEW.
+
+    The entity is removed from a workspace and stays on the site until the
+    workspace is published. A trigger that any tag still references is
+    refused up front, with the referencing tags named. Refused unless
+    gtm.write_enabled is set. Returns the entity that would be deleted, the
+    resolved workspace and a plan_id.
+
+    Args:
+        entity_type: "tag" or "trigger".
+        entity_id: Numeric ID of the entity (see list_gtm_tags and
+            list_gtm_triggers).
+        workspace_id: Workspace to edit (see list_gtm_workspaces). Empty uses
+            the Default Workspace, or the only workspace there is.
+        gtm_account_id: Numeric GTM account ID (see list_gtm_accounts). Empty
+            uses gtm.account_id from the config.
+        gtm_container_id: Numeric GTM container ID (see list_gtm_containers).
+            Empty uses gtm.container_id from the config.
+    """
+    from adloop.gtm.write import draft_delete_gtm_entity as _impl
+
+    gtm_account_id, gtm_container_id = _gtm_defaults(gtm_account_id, gtm_container_id)
+    return _impl(
+        current_config(),
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        workspace_id=workspace_id,
+    )
+
+
+@_tool(title="Draft publishing a Tag Manager workspace", annotations=_DESTRUCTIVE, tags={"gtm"})
+@_safe
+def draft_publish_gtm_workspace(
+    version_name: str = "",
+    version_notes: str = "",
+    workspace_id: str = "",
+    gtm_account_id: str = "",
+    gtm_container_id: str = "",
+) -> dict:
+    """Draft publishing a Tag Manager workspace LIVE — returns a PREVIEW.
+
+    Every pending change in the workspace goes live, including changes other
+    people made in the GTM UI; the preview lists them all. Apply refuses when
+    the workspace changed after the preview, has merge conflicts, or reports
+    compiler errors in a quick preview, and it refuses a Custom HTML tag
+    being added or changed while gtm.allow_custom_html is off. Refused unless
+    gtm.write_enabled is set. Returns the pending changes, the version that
+    is live now (for a one-step rollback), the version name that would be
+    created and a plan_id. That gate matches the tag type html; a Custom
+    JavaScript variable or a custom template tag (cvt_…), which can inject a
+    script, is not covered and needs review in the GTM UI.
+
+    Args:
+        version_name: Name of the container version created by the publish.
+            Empty uses "AdLoop publish <UTC timestamp>".
+        version_notes: Notes stored on the created version. Empty leaves them
+            out.
+        workspace_id: Workspace to publish (see list_gtm_workspaces). Empty
+            uses the Default Workspace, or the only workspace there is.
+        gtm_account_id: Numeric GTM account ID (see list_gtm_accounts). Empty
+            uses gtm.account_id from the config.
+        gtm_container_id: Numeric GTM container ID (see list_gtm_containers).
+            Empty uses gtm.container_id from the config.
+    """
+    from adloop.gtm.write import draft_publish_gtm_workspace as _impl
+
+    gtm_account_id, gtm_container_id = _gtm_defaults(gtm_account_id, gtm_container_id)
+    return _impl(
+        current_config(),
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        workspace_id=workspace_id,
+        version_name=version_name,
+        version_notes=version_notes,
     )
 
 

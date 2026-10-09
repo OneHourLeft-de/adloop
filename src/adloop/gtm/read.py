@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from adloop.gtm.entities import ENTITY_ID_FIELDS, ENTITY_KINDS
+
 if TYPE_CHECKING:
     from adloop.config import AdLoopConfig
 
@@ -553,13 +555,15 @@ def get_workspace_diff(
         change_status = change.get("changeStatus", "unknown")
         summary[change_status] = summary.get(change_status, 0) + 1
 
-        for kind in ("tag", "trigger", "variable", "folder", "client", "transformation", "zone"):
+        for kind in ENTITY_KINDS:
             if kind in change:
                 entity = change[kind]
                 parsed_changes.append({
                     "change_status": change_status,
                     "entity_kind": kind,
-                    "entity_id": entity.get(f"{kind}Id"),
+                    "entity_id": entity.get(
+                        ENTITY_ID_FIELDS.get(kind, f"{kind}Id")
+                    ),
                     "name": entity.get("name"),
                     "type": entity.get("type"),
                 })

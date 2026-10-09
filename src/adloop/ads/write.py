@@ -2615,7 +2615,8 @@ def draft_sitelinks(
 
 # ---------------------------------------------------------------------------
 # confirm_and_apply — the only function that actually mutates an ad account
-# (Google Ads here; Reddit plans are dispatched to adloop.reddit.write)
+# (Google Ads here; Reddit plans are dispatched to adloop.reddit.write and
+# Tag Manager plans to adloop.gtm.write)
 # ---------------------------------------------------------------------------
 
 
@@ -2718,7 +2719,12 @@ def confirm_and_apply(
         dry_run = True
 
     is_reddit = plan.operation.startswith("reddit_")
-    platform_label = "Reddit Ads" if is_reddit else "Google Ads"
+    is_gtm = plan.operation.startswith("gtm_")
+    platform_label = (
+        "Reddit Ads" if is_reddit
+        else "Google Tag Manager" if is_gtm
+        else "Google Ads"
+    )
     # ``plan.changes`` is the summary a preview may show; upload rows carry raw
     # PII in ``plan.apply_only_payload``, which never reaches the audit log or
     # a dry-run response.
@@ -2729,11 +2735,14 @@ def confirm_and_apply(
         # Either way a failed check leaves dry_run_result unset, so two-phase
         # apply keeps refusing the real write.
         try:
-            if is_reddit:
-                # Reddit has no validate-only mode; the dry run re-reads the
-                # target and re-runs the safety caps against live values.
-                from adloop.reddit.write import preflight
+            if is_reddit or is_gtm:
+                # Neither Reddit nor Tag Manager has a validate-only mode; the
+                # dry run re-reads the target and re-runs the safety checks
+                # against live values.
+                from adloop.gtm.write import preflight as gtm_preflight
+                from adloop.reddit.write import preflight as reddit_preflight
 
+                preflight = reddit_preflight if is_reddit else gtm_preflight
                 preflight_checks = preflight(config, plan)
             elif plan.operation != "create_key_event":
                 # Google Ads checks the exact mutates with validate_only=True
@@ -2769,8 +2778,8 @@ def confirm_and_apply(
                 error=error_message,
             )
             checked_against = (
-                "re-checked the target against Reddit"
-                if is_reddit
+                f"re-checked the target against {platform_label}"
+                if is_reddit or is_gtm
                 else "sent the change to Google Ads in validate-only mode"
             )
             return {
@@ -2821,8 +2830,15 @@ def confirm_and_apply(
         if preflight_checks is not None:
             response["checks"] = preflight_checks
             response["note"] = (
-                "Reddit Ads has no validate-only mode: the dry run re-read the "
-                "target and re-checked the safety caps; nothing was sent."
+                f"{platform_label} has no validate-only mode: the dry run "
+                "re-read the target and re-checked the safety gates; nothing "
+                "was changed live."
+                + (
+                    " The publish preflight ran a Tag Manager quick preview, "
+                    "which stores a preview version and publishes nothing."
+                    if is_gtm
+                    else ""
+                )
             )
         if validation is not None:
             row_errors = validation.pop("row_errors", [])
@@ -3814,6 +3830,12 @@ def _execute_plan(
         from adloop.reddit.write import apply_plan
 
         return apply_plan(config, plan)
+
+    # Tag Manager plans likewise never touch the Ads client.
+    if plan.operation.startswith("gtm_"):
+        from adloop.gtm.write import apply_plan as apply_gtm_plan
+
+        return apply_gtm_plan(config, plan)
 
     # GA4 plans dispatch before Ads client construction so they work for
     # GA4-only setups (no Ads credentials/developer token required).
