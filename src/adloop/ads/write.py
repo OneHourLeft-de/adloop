@@ -3342,12 +3342,18 @@ def _validate_campaign(
             "get_pmax_performance reports per-asset-group Ad Strength."
         )
     elif ct != "SEARCH":
-        # These do produce a usable campaign, but nothing here can populate
-        # them: draft_ad_group refuses anything that is not SEARCH.
-        warnings.append(
-            f"{ct} campaigns are created as a shell only. AdLoop can add ad "
-            f"groups, ads and keywords to SEARCH campaigns; finish this one "
-            f"in the Google Ads interface."
+        # The create path builds a Search campaign: a SEARCH_STANDARD ad
+        # group, keywords and language criteria. Shopping also needs a
+        # shopping_setting with the Merchant Center ID, a SHOPPING_PRODUCT_ADS
+        # ad group, a product ad and a listing-group tree, and refuses
+        # language criteria; Display and Video need their own ad group types.
+        # Google rejects every one of these plans, so refuse them at draft
+        # instead of letting the dry run or the apply discover it.
+        errors.append(
+            f"{ct} campaigns cannot be created yet: AdLoop builds Search "
+            f"campaigns only, and Google rejects a {ct} campaign without its "
+            f"channel-specific settings and ad group type. Create it in the "
+            f"Google Ads interface, then use AdLoop to analyse and manage it."
         )
 
     if ct != "SEARCH" and search_partners_enabled:

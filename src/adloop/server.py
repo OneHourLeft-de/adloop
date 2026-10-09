@@ -1892,9 +1892,10 @@ def draft_campaign(
     Creates: CampaignBudget + Campaign (PAUSED) + AdGroup + optional Keywords
     + geo targeting + language targeting.
     Ads are NOT included — draft_responsive_search_ad adds them once the
-    campaign exists. Performance Max is refused (it needs an asset group with
-    all its assets in one request); DISPLAY, SHOPPING and VIDEO campaigns are
-    created as a shell only.
+    campaign exists. Only SEARCH campaigns can be created: Performance Max
+    needs an asset group with all its assets in one request, and DISPLAY,
+    SHOPPING and VIDEO need channel-specific settings and ad group types, so
+    the draft refuses them.
 
     Returns a preview with a plan_id plus any warnings (e.g. a daily budget
     below 5x target CPA, MANUAL_CPC); nothing changes until confirm_and_apply
@@ -1923,8 +1924,8 @@ def draft_campaign(
         target_roas: Target return on ad spend as a ratio (e.g. 4.0 = 400%);
             required if bidding_strategy is TARGET_ROAS, optional target for
             MAXIMIZE_CONVERSION_VALUE. 0 means none.
-        channel_type: SEARCH (default) | DISPLAY | SHOPPING | VIDEO |
-            PERFORMANCE_MAX (refused, see above).
+        channel_type: SEARCH (default). DISPLAY, SHOPPING, VIDEO and
+            PERFORMANCE_MAX are refused with the reason (see above).
         ad_group_name: Name of the initial ad group. Empty uses campaign_name.
         keywords: Optional list of {"text": "keyword", "match_type":
             "EXACT|PHRASE|BROAD"} added to the initial ad group.
