@@ -487,6 +487,21 @@ class TestDirectoryReadiness:
         assert "Args:" not in tool.description
         assert "description" in tool.parameters["properties"]["campaign_id"]
 
+    @pytest.mark.asyncio
+    async def test_every_parameter_has_a_schema_description(self):
+        """Directory quality scores rate tools with undocumented parameters
+        low; FastMCP fills these from each docstring's Args: section."""
+        from adloop.server import mcp
+
+        undocumented = []
+        for tool in await mcp.list_tools():
+            assert "Args:" not in (tool.description or ""), tool.name
+            for name, prop in (tool.parameters.get("properties") or {}).items():
+                text = (prop.get("description") or "").strip()
+                if not text or "Args:" in text:
+                    undocumented.append(f"{tool.name}.{name}")
+        assert not undocumented, "\n".join(undocumented)
+
     # Phrasings that instruct the model instead of documenting the tool.
     # Directory policy: descriptions carry no instructions about model
     # behavior, other tools, or external instruction sources.
